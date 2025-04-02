@@ -1,0 +1,748 @@
+---
+title: "ml_workflow"
+author: "WangYong"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Target
+The goal of this competition is to predict listening time of a podcast episode.
+
+ML tools: 
+  tidymodels related worksflows & glm, lightgbm, ranger engine.
+  
+Evaluatioin metric:
+  Root Mean Squared Error (RMSE)
+  
+  sample_submission.csv : 27.16
+  basic lm score on rcp_base_v0 : 26.86687	
+  kaggle best score is 12.310 in the begining.
+  
+Notice:
+
+
+## librar y & load_data
+
+### library
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(finetune)
+library(future)
+library(purrr)
+library(furrr)
+library(textrecipes)
+library(themis)
+
+
+library(bonsai)
+library(lightgbm)
+library(xgboost)
+library(ranger)
+
+library(readr)
+library(janitor)
+library(lubridate)
+
+library(memoise)
+dk_cach <- memoise::cache_filesystem('./cache')
+```
+### download to local
+```{r}
+competition_name <- 'playground-series-s5e4'
+data_path <- file.path('../input',competition_name)
+# system(paste0('kaggle competitions  download -c ', competition_name))
+# unzip(paste0(competition_name,'.zip'),exdir=file.path('../input',competition_name))
+# file.remove(paste0(competition_name,'.zip'))
+```
+
+
+### loading data
+
+```{r}
+
+train<- 
+  readr::read_csv(file.path(data_path, 'train.csv'),
+                  show_col_types = FALSE)|>
+  janitor::clean_names()
+test <- 
+  readr::read_csv(file.path(data_path, 'test.csv'),
+                  show_col_types = FALSE)|>
+   janitor::clean_names()
+submission <-  readr::read_csv(file.path(data_path, 'sample_submission.csv'),show_col_types = FALSE)|>
+   janitor::clean_names()
+```
+
+### quick skim
+
+```{r}
+train|> skimr::skim()
+```
+
+```{r}
+test|> skimr::skim()
+```
+
+```{r}
+submission |> skimr::skim()
+```
+
+### check if train & test is same distribution
+
+```{r}
+get_df_var<-function(df){
+  df|>
+    select(-any_of(c('id','rainfall')))|>
+    summarize_all(var)|>
+    pivot_longer(cols=everything(),
+                 names_to='feature',
+                 values_to='variance')
+
+}
+list(train=train, test=test)|>
+  map_dfr(\(x) get_df_var(x), .id = "dataset") |>
+  pivot_wider(names_from=dataset, values_from = variance)|>
+  mutate(pct_change=(train-test)/train)#|>arrange(desc(abs(diff)))
+```
+
+### Finding of different distribution
+there is no big change found 
+
+## EDA
+### see the listening_time_minutes distribution
+```{r}
+train |> select(listening_time_minutes) |>
+  ggplot(aes(x=listening_time_minutes)) +
+  geom_density() +
+  labs(title='listen_time_minutes distribution')+
+  theme_minimal()
+
+```
+### check the predict with response
+#### podcast_name
+```{r}
+train|>
+  ggplot(aes(x=podcast_name,y=listening_time_minutes)) +
+  geom_col()
+train|>count(podcast_name,wt=listening_time_minutes,sort=TRUE)
+```
+
+#### episode_title(***)
+```{r}
+train|>mutate(episode_id =as.integer(str_replace(
+  episode_title,
+  'Episode ','')))|>
+  ggplot(aes(x=episode_id,y=listening_time_minutes)) +
+  geom_smooth()
+train|>mutate(episode_id =str_replace(
+  episode_title,
+  'Episode ',''))|>count(episode_id,wt=listening_time_minutes,sort=TRUE)
+```
+episode_title transformat to episode id will improve the models 
+
+#### episode_length_minutes 
+```{r}
+train|>
+  ggplot(aes(x=episode_length_minutes,y=listening_time_minutes)) +
+ 
+  geom_smooth()
+
+train|>
+  ggplot(aes(x=episode_length_minutes)) +
+  geom_density()
+```
+the episode_length_minutes is highly related to the listen time but it has boundary (lower and upper). that's say it is 4 and 121
+#### genre 
+#### host_popularity_percentage 
+#### publication_day 
+#### publication_time 
+#### guest_popularity_percentage 
+#### number_of_ads 
+#### episode_sentiment 
+#### listening_time_minutes
+
+### outlier detect base on train & test
+```{r fig.height=3, fig.width=5}
+library(applicable)
+library(isotree)
+
+internal_get_outliers <- function(od_target){
+  remove_cols <- c('id','listening_time_minutes')
+  od_tr <- train |> select(-any_of(remove_cols))
+  od_te <- od_target |>  select(-any_of(remove_cols))
+  if_mod <- apd_isolation(od_tr, ntrees = 50, nthreads = 1)
+  od_score <- score(if_mod, od_te)
+  
+  return(od_score)
+}
+
+get_outliers <- memoise::memoise(internal_get_outliers,cache=dk_cach)
+
+list(tr=train,te=test)|>
+  map_dfr(\(data) get_outliers(data),
+          .id='source') |>
+  ggplot(aes(x=score,group=source,color=source)) +
+  geom_density(alpha = 0.5)+labs(title='outliers compare')+theme_minimal()
+ts_od <- train  |> get_outliers() |> bind_cols(train)
+
+```
+The above plot shoed the train & test data set almost perfrect similiar from outlier distance viewpoint. 
+Thus, we can believe they are same distribution
+
+## coding
+
+### 1. Data Loading and Initial Exploration ----
+
+### 2. Feature Engineering ----
+
+-   leave it in the preprocessing recipe
+
+### 3. Data Splitting ----
+
+#### augment_df
+
+#### split/cv
+
+```{r}
+set.seed(1234)
+#train <- ts_df |> as_tibble() |>filter(source=='train')|>select(-source)
+#df_split <- initial_time_split(train, prop = 0.8)
+od_train <- train |>get_outliers()  |>bind_cols(train)
+od_test <- test|>get_outliers()  |>bind_cols(test)
+df_split <- initial_split(train, prop = 0.3, strata =listening_time_minutes )
+train_set <- training(df_split)
+test_set <- testing(df_split)
+cv_folds <- vfold_cv(train_set,
+                     v = 3,
+                     repeats = 1,
+                     strata = listening_time_minutes)
+#cv_folds <- train_set |> sliding_period(index=date, period='year')
+```
+
+### 4. Preprocessing Recipe ----
+#### 4.0 v0 base_rcp
+```{r}
+rcp_bs <-
+  recipe(listening_time_minutes ~ ., data = train_set) |>
+  update_role(id, new_role='ID')
+
+```
+
+#### 4.0 v0 base_line
+```{r}
+rcp_bs_v0 <-
+  rcp_bs|> #step_rm(date,year_offset)|>
+  step_impute_median(all_numeric_predictors())|> 
+
+  step_YeoJohnson(all_numeric_predictors()) |>
+  step_bin2factor(all_logical_predictors())|>
+  step_novel(all_nominal_predictors())|>
+  step_unknown(all_nominal_predictors()) |>
+  step_other(all_nominal_predictors())|>
+  step_dummy(all_nominal_predictors(),one_hot = TRUE) |>
+  step_nzv(all_predictors())|>
+  step_corr(all_numeric_predictors())|>
+  step_normalize(all_numeric_predictors())|> 
+  check_missing(all_predictors())
+```
+
+#### 4.1 v1 adv + episodeid + length
+```{r}
+rcp_bs_v1 <-
+  rcp_bs|> #step_rm(date,year_offset)|>
+  step_impute_median(all_numeric_predictors())|> 
+  step_mutate(
+    episode_id =as.integer(str_replace( episode_title, 'Episode ','')),
+    length_normal = case_when(episode_length_minutes<5~-1, # too short
+                              episode_length_minutes>120~1, # too long
+                              .default=0),# normal length
+    noad =case_when(number_of_ads==0~1, .default=1))|>
+  step_rm(episode_title)|>
+  step_YeoJohnson(all_numeric_predictors()) |>
+  step_bin2factor(all_logical_predictors())|>
+  step_novel(all_nominal_predictors())|>
+  step_unknown(all_nominal_predictors()) |>
+  step_other(all_nominal_predictors())|>
+  step_dummy(all_nominal_predictors(),one_hot = TRUE) |>
+  step_nzv(all_predictors())|>
+  step_corr(all_numeric_predictors())|>
+  step_normalize(all_numeric_predictors())|> 
+  check_missing(all_predictors())
+```
+##### diagnose
+```{r}
+tmp_rcp<- rcp_bs_v1|>prep()|>juice()
+tmp_rcp |> names()
+```
+
+
+#### 4.10 all recipes
+
+```{r}
+set.seed(1234)
+library(future)
+library(furrr)
+selected_rcps <- list(bs=rcp_bs_v0,
+                      v1=rcp_bs_v1)
+plan(multisession,workers = 5)
+#selected_rcps|>map(\(rcp_item) rcp_item|>prep()|>bake(new_data=train_set)|>summary())
+plan(sequential)
+```
+
+### 5. Model Specification ----
+
+```{r}
+
+lm_eng <-linear_reg() %>%
+  set_mode("regression") %>%
+  set_engine("lm")
+glmnet_eng <- 
+ linear_reg(penalty = 0.0129155,
+               mixture = 0.2222222) |>  # Example penalty and mixture values
+  set_engine("glmnet") |>
+  set_mode("regression")    # Specify regression
+glm_eng <- 
+  linear_reg() |>  # Example penalty and mixture values
+  set_engine("glm") |>
+  set_mode("regression")    # Specify regression
+lgbm_eng<-
+   parsnip::boost_tree(
+      trees = 500, # Number of trees
+      learn_rate = 0.01,
+      tree_depth =5,
+      loss_reduction = 0.001,
+      stop_iter = 50,
+      sample_size = 0.9, # Added sample_size
+      #tree_depth = tune(),
+      #mtry = 0.5,
+      min_n = 100
+   ) |>
+   set_mode("regression")|>
+   set_engine("lightgbm",
+              #metric='roc_auc', 
+              num_leaves = 20,
+              counts = FALSE,
+              num_threads=12,
+              metric = "auc",              # 优化目标
+              # reg_alpha=0.01,
+              # reg_lambda = 0.5,
+              verbose=1) 
+
+rf_eng<- rand_forest( trees = 700, 
+                      #mtry=100, 
+                      min_n=100) |>
+  set_engine("ranger",num.threads=4)|>
+  set_mode("regression") 
+
+xgb_eng<- parsnip::boost_tree( trees = 500, 
+                      learn_rate = 0.01,
+                      loss_reduction = 0.001,
+                      sample_size = 0.8, # Added sample_size
+                      #mtry=tune(),
+                      min_n=70) |>
+  set_engine("xgboost",num.threads=8)|>
+  set_mode("regression")
+#[1] "use_C5.0"             "use_cubist"           "use_earth"            "use_glmnet"           "use_kernlab_svm_poly" "use_kernlab_svm_rbf" 
+#[7] "use_kknn"             "use_ranger"           "use_xgboost" 
+
+
+
+earth_eng <-  # good model base score 0.8718
+  mars() %>% 
+  set_mode("regression") %>% 
+  set_engine("earth") 
+
+svm_eng <- 
+  svm_rbf(
+    cost = 1.714488,
+    rbf_sigma = 0.001668101 ) %>% 
+  set_mode("regression") 
+
+kknn_eng <- 
+  nearest_neighbor(neighbors = 5, 
+                   #weight_func = tune()
+                   ) %>% 
+  set_mode("regression") %>% 
+  set_engine("kknn") 
+
+selected_eng <- list(glm=glm_eng,
+                     glmnet=glmnet_eng,
+                     # rf=rf_eng,
+                     # lgbm=lgbm_eng,
+                     # xgb=xgb_eng,
+                     # #c50=c50_eng,
+                     # earth= earth_eng,
+                     # #kknn=kknn_eng,
+                     svm=svm_eng
+                     
+                     )
+
+```
+
+### 6. Workflow ----
+#### set metrics
+```{r}
+rmse_metrics <- metric_set(rmse) # main goal is roc_auc, accuracy is just for reference
+```
+
+#### simple wflow
+
+```{r}
+set.seed(1234)
+
+simple_wf_fit <- 
+  workflow() |>
+  add_recipe(rcp_bs_v1) |>
+  add_model(lm_eng)|>
+  fit(train_set)
+simple_wf_fit |> glance()
+  #fit_resamples(cv_folds,
+  #        control = control_resamples(verbose=TRUE),
+  #         metrics=rmse_metrics)
+  #simple_wf_fit |> collect_metrics() 
+```
+
+#### simple workflowset
+
+```{r}
+set.seed(1234)
+library(future)
+plan(multisession,workers = 16)
+ctrl <- control_resamples(save_pred = TRUE, save_workflow = TRUE,verbose=TRUE)
+wfs_result <-
+  workflow_set(preproc = selected_rcps,
+               models = selected_eng,
+               cross=TRUE) |>
+  workflow_map(fn='fit_resamples',
+               #resamples = vfold_cv(od_train, v = 10,strata = rainfall) ,
+               resamples =cv_folds,
+               metrics =rocauc_metrics,
+               control = ctrl
+               )
+wfs_result|> 
+  collect_metrics()  |>
+  filter(.metric=='roc_auc')|>
+  select(wflow_id, model, .metric,mean, n, std_err
+         )
+  
+plan(sequential)
+```
+
+### 7 stacking
+
+```{r}
+set.seed(1234)
+library(future)
+plan(multisession,workers = 4)
+combined_fit <-
+  stacks::stacks()|>
+  stacks::add_candidates(wfs_result)|>
+  stacks::blend_predictions()|>
+  stacks::fit_members()
+
+combined_fit|>
+  autoplot(type = "weights")
+
+autoplot(combined_fit)
+#plan(sequential)
+```
+
+### 7. Tuning Grid ----
+#### define tune helper
+```{r}
+get_tuned<- function(rcp, mod,tune_grid,is_plot=FALSE, eng_name='glmnet'){
+  library(future)
+  total_cores= 4
+  # 定义调优控制选项
+ctrl <- control_grid(
+  verbose = TRUE,         # 显示详细信息
+  allow_par = TRUE,       # 允许并行计算
+  save_pred = TRUE,       # 保存预测结果
+  save_workflow = TRUE,   # 保存工作流
+  #parallel_over = "resamples"  # 并行计算方式
+)
+  plan(multisession,workers = total_cores - 4)
+  tune_wf_fit <- 
+    workflow() |>
+    add_recipe(rcp) |>
+    add_model(mod)|>
+    tune_grid(resamples = cv_folds,
+              grid = tune_grid,
+              control = ctrl,
+              metrics =rocauc_metrics )
+  
+  
+  plan(sequential) 
+  
+  best_params <- select_best(tune_wf_fit, metric = "roc_auc")
+  print(best_params)
+  tuned_parameter <- tune_wf_fit |> collect_metrics() 
+  
+  if(is_plot){
+    plt <- switch(eng_name,
+                  'glmnet' = ggplot(data = tuned_parameter, aes(x = penalty, y = mean, color = as.factor(mixture))),
+                  'svm' = ggplot(data = tuned_parameter, aes(x = cost, y = mean, color = as.factor(rbf_sigma)))
+                 ) 
+    plt + 
+      geom_line() +
+      geom_point() +
+      #scale_x_log10() +  # 对 penalty 取对数
+      labs(title = "parameter to  vs ROC AUC",
+           x = "parameter 1 ",
+           y = "ROC AUC",
+           color = "parameter 2") +
+      theme_minimal()
+    plt 
+  }
+  return(tuned_parameter)
+}
+```
+
+#### tune glmnet
+```{r}
+set.seed(1234)
+glmnet_spec <- logistic_reg(penalty = tune(), mixture = tune()) %>%  # 调优 penalty 和 mixture
+  set_engine("glmnet") %>%
+  set_mode("regression")
+
+glmnet_grid <- grid_regular(
+  penalty(range = c(-5, -1)),  # log10(penalty) 的范围
+  mixture(range = c(0, 1)),    # mixture 的范围（0: Ridge, 1: Lasso）
+  levels = 10                   # 每个参数的网格点数
+)
+get_tuned(rcp_v13,glmnet_spec, glmnet_grid,is_plot=TRUE,eng_name='glmnet')
+```
+
+#### tune svm
+```{r}
+set.seed(1234)
+svm_spec <- svm_rbf(cost = tune(), rbf_sigma = tune()) %>%  # 调优 cost 和 rbf_sigma
+  set_engine("kernlab") %>%
+  set_mode("regression")
+svm_grid <- grid_regular(
+  cost(range = c(0, 1)),        # cost 的范围（log10 尺度）
+  rbf_sigma(range = c(-5, -1)),   # rbf_sigma 的范围（log10 尺度）
+  levels = 10                     # 每个参数的网格点数
+)
+get_tuned(rcp_v13,svm_spec, svm_grid,is_plot=TRUE, eng_name='svm')
+```
+
+#### tune lgbm
+```{r}
+# 定义 LightGBM 模型
+lgbm_spec <- boost_tree(
+  mode = "regression",  # 分类任务
+  engine = "lightgbm",
+  mtry = tune(),            # 随机选择的特征数量
+  trees = tune(),           # 树的数量
+  min_n = tune(),           # 叶子节点的最小样本数
+  tree_depth = tune(),      # 树的最大深度
+  learn_rate = tune(),      # 学习率
+  loss_reduction = tune(),# 损失减少阈值
+)  |>  set_mode("regression")|>
+   set_engine("lightgbm",
+              metric = "auc",              # 优化目标
+              verbose=1) 
+
+# 定义调参网格
+lgbm_grid <- grid_regular(
+  mtry(range = c(8, 13)),           # 特征数量范围
+  trees(range = c(300, 800)),        # 树的数量范围
+  min_n(range = c(10, 50)),          # 叶子节点的最小样本数范围
+  tree_depth(range = c(5, 10)),     # 树的最大深度范围
+  learn_rate(range = c(0.001, 0.1)), # 学习率范围
+  loss_reduction(range = c(0, 0.001)),# 损失减少阈值范围
+  levels = 10                        # 每个参数的网格点数
+)
+get_tuned(rcp_v13,lgbm_spec, lgbm_grid)
+# tune_lgbm_workflow <- 
+#   workflow_set(preproc = selected_rcps,
+#                models = list(lgb=tune_lgbm_spec) ) 
+# 
+# # Tune the model using ANOVA Race
+# tune_results <-  tune_lgbm_workflow |>
+#   workflow_map(fn='tune_race_anova',
+#                resamples=cv_folds,
+#                seed=1234,
+#                grid=tune_lgbm_grid,
+#                metrics=rocauc_metrics,
+#                control = control_race(save_pred = TRUE, save_workflow = TRUE,verbose=TRUE) # Show progress
+#                )
+# tune_results|>rank_results()
+
+```
+
+
+#### tune
+```{r}
+# 
+# glmnet_recipe <- rcp_bs_v0_wd_smote
+# 
+# glmnet_spec <- 
+#   multinom_reg(penalty = tune(), mixture = tune()) %>% 
+#   set_mode("regression") %>% 
+#   set_engine("glmnet") 
+# 
+# glmnet_workflow <- 
+#   workflow() %>% 
+#   add_recipe(glmnet_recipe) %>% 
+#   add_model(glmnet_spec) 
+# 
+# glmnet_grid <- tidyr::crossing(penalty = 10^seq(-4, -1, length.out = 20), 
+#                                mixture = c(0.05, 0.2, 0.4, 0.6, 0.8, 1)) 
+# 
+# 
+# glmnet_tune <- 
+#   tune_grid(glmnet_workflow, resamples =cv_folds, grid = glmnet_grid,
+#             control=control_grid(save_pred = TRUE, 
+#                                  verbose = TRUE,
+#                                  allow_par = F)) # Keep predictions
+# 
+# glmnet_tune |>show_best()
+# ```
+# #### tune lgbm
+# ```{r}
+# lgbm_recipe <- rcp_bs_v0_wd_smote 
+# 
+# lgbm_spec <-  
+#   boost_tree(
+#     trees = tune(),
+#     tree_depth = tune(),
+#     learn_rate = tune(),
+#     mtry = tune(),
+#     min_n = tune(), 
+#     loss_reduction = numeric() ) |> 
+#   set_engine("lightgbm",
+#              max_bin=tune(),
+#               # reg_lambda = tune(),  
+#               # max_bin = tune(),
+#               # min_sum_hessian_in_leaf = tune(),
+#              #bagging_fraction = tune()
+#             )|>
+#   set_mode("regression")
+# 
+# lgbm_workflow <- 
+#   workflow() |> 
+#   add_recipe(lgbm_recipe) |>
+#   add_model(lgbm_spec) 
+# lgbm_grid <- lgbm_workflow |>
+#   extract_parameter_set_dials( ) |>
+#   update(
+#     trees= trees(range=c(300,700)),
+#     tree_depth = tree_depth(range = c(3, 8)),  # 原默认范围可能更宽，此处缩小
+#     learn_rate = learn_rate(range = c(-2, -1)), # 指数范围：0.01 ~ 0.1
+#     mtry = mtry(range=c(5,11)),
+#     max_bin = integer(c(31,128)),
+#     min_n = min_n(range = c(10, 50))
+#   )|>
+#   grid_space_filling(size=5)
+# 
+# set.seed(1234)
+# lgbm_tune <-
+#   tune_grid(lgbm_workflow, 
+#             resamples = cv_folds, 
+#             grid =lgbm_grid,
+#             control=control_race(save_pred = TRUE, save_workflow = TRUE,verbose=TRUE))
+# 
+# lgbm_tune |> show_best()
+```
+
+### 8. Cross-Validation ----
+
+```{r}
+# combined it with step3 data splitting
+```
+
+### 9. Tuning and Evaluation ----
+
+```{r}
+# plan(multisession,workers =2)
+# cars_tune_results <- cars_workflow |>
+#   tune_grid(
+#     resamples = cars_folds,
+#     grid = cars_grid,
+#     metrics = metric_set(rmse),
+#      control = control_grid(save_pred = TRUE, 
+#                             verbose = TRUE,
+#                             allow_par = F) # Keep predictions
+#   )
+#  
+#  # Find best parameters
+#  best_params <- cars_tune_results |>
+#    select_best("rmse")
+# 
+#  # Finalize workflow with best parameters
+#  final_workflow <- cars_workflow |>
+#    finalize_workflow(best_params)
+```
+
+```{r}
+# Fit the final workflow to the training data
+# final_lgbm_fit <- last_fit(final_workflow,cars_split )
+# final_lgbm_mod <- extract_workflow(final_lgbm_fit )
+# collect_metrics(final_lgmb_mod)
+
+# plan(sequential)
+
+```
+
+### 10. Evaluate on Test Set ----
+
+```{r}
+combined_test_result <- 
+  test_set %>%
+  bind_cols(predict(combined_fit, 
+                    new_data=test_set,type='prob'))
+combined_test_result|>rocauc_metrics(rainfall, .pred_1,event_level = 'second')
+```
+
+### 11. Prepare Submission ----
+
+```{r}
+set.seed(1234)
+library(future)
+plan(multisession,workers = 12)
+final_model <- combined_fit#simple_wf_fit|>extract_workflow()
+#final_model <- simple_wf_fit|>extract_workflow()
+final_predictions <- final_model |>
+   predict(new_data = od_test,
+           type='prob') 
+plan(sequential)
+
+ # #Handle negative predictions
+ # final_predictions <- final_predictions |>
+ #   mutate(.pred= ifelse(.pred< 0, 0, .pred))
+
+ # Save submission file
+ submission |>
+   #mutate(rainfall=final_predictions$.pred_1)|>
+   readr::write_csv("submission.csv")
+ zip('submission.csv.zip','submission.csv')
+ 
+```
+
+## kaggle submission
+
+
+
+### score submit
+```{r}
+# submit latest submission.csv
+system('kaggle competitions submit -c playground-series-s5e4 -f submission.csv.zip -m "samplesubmission as initial rmse "')
+
+Sys.sleep(15)
+# get latest score 
+system('kaggle competitions submissions -q -c playground-series-s5e4')
+
+```
+
+### notebook convert
+```{r}
+ library(rmd2jupyter)
+ rmd2jupyter('podcast_listening_time.Rmd')
+```
