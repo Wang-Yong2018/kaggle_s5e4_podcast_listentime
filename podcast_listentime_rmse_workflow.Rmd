@@ -21,6 +21,26 @@ Evaluatioin metric:
   sample_submission.csv : 27.16
   basic lm score on rcp_base_v0 : 26.86687	
   kaggle best score is 12.310 in the begining.
+  after remove all nominal variable in recipe, 
+    the rmse dropped to 13.45 for linear regression(lm.glm,glmnet), other models score is similar to 13.4.
+    
+without od 
+wflow_id        model .metric mean    n std_err
+bs_glmnet	linear_reg	rmse	13.37632	3	0.03552270
+bs_lgbm	boost_tree	  rmse	13.15716	3	0.03250658
+bs_lm	linear_reg	    rmse	13.37546	3	0.03564681
+v1_glmnet	linear_reg	rmse	13.35012	3	0.03671508
+v1_lgbm	boost_tree	rmse	13.14977	3	0.03586444
+v1_lm	linear_reg	rmse	13.34911	3	
+
+withod reduced the sd
+bs_glmnet	linear_reg	rmse	13.37922	3	0.02340536
+bs_lgbm	boost_tree	rmse	13.22553	3	0.01676875
+bs_lm	linear_reg	rmse	13.37832	3	0.02334031
+v1_glmnet	linear_reg	rmse	13.34808	3	0.02244264
+v1_lgbm	boost_tree	rmse	13.19260	3	0.01781949
+v1_lm	linear_reg	rmse	13.34688	3	0.02198646
+
   
 Notice:
 
@@ -38,13 +58,14 @@ library(purrr)
 library(furrr)
 library(textrecipes)
 library(themis)
+library(embed)
 
 
 library(bonsai)
 library(lightgbm)
 library(xgboost)
 library(ranger)
-
+library(betareg)
 library(readr)
 library(janitor)
 library(lubridate)
@@ -56,6 +77,7 @@ dk_cach <- memoise::cache_filesystem('./cache')
 ```{r}
 competition_name <- 'playground-series-s5e4'
 data_path <- file.path('../input',competition_name)
+target_name <- 'listening_time_minutes'
 # system(paste0('kaggle competitions  download -c ', competition_name))
 # unzip(paste0(competition_name,'.zip'),exdir=file.path('../input',competition_name))
 # file.remove(paste0(competition_name,'.zip'))
@@ -114,57 +136,211 @@ list(train=train, test=test)|>
 there is no big change found 
 
 ## EDA
-### see the listening_time_minutes distribution
+### helpers
+#### numeric plot
 ```{r}
-train |> select(listening_time_minutes) |>
-  ggplot(aes(x=listening_time_minutes)) +
-  geom_density() +
-  labs(title='listen_time_minutes distribution')+
-  theme_minimal()
+library(patchwork)
+plot_num_column_eda<-function(df,col_name, y_name=target_name){
+
+  p1 <- df|>
+    ggplot(aes(x=.data[[col_name]])) +
+    geom_density() +theme_classic()
+  
+  p2 <- df|>
+    ggplot(aes(x=.data[[col_name]],y=.data[[y_name]])) +
+    geom_smooth() +
+    theme_classic()
+  p1/p2 
+}
+
+plot_cat_column_eda <- function(df, col_name,n_lump=10){
+
+  p1 <- df|>ggplot(aes(y=.data[[col_name]]))  + geom_bar() +theme_classic()
+  p2 <- df|>ggplot(aes(y=.data[[col_name]],x=.data[[target_name]])) + geom_boxplot() +theme_classic()
+  p1/p2
+}
+
+plot_column_eda <- function(df, col_name, y_name=target_name){
+  
+  is_numeric <- is.numeric(df[[col_name]])
+  if(is_numeric){
+    plt <- plot_num_column_eda(df, col_name, y_name)
+  }else{
+    
+    plt <- plot_cat_column_eda(df, col_name, y_name)
+  }
+  return(plt)
+}
 
 ```
+
+
+### see the listening_time_minutes distribution
+```{r}
+col_name <- 'listening_time_minutes'
+
+train|>ggplot(aes(x=.data[[col_name]])) +geom_density()
+
+
+kurtosis_value <- moments::kurtosis(train[[col_name]])
+print(paste("样本峰度:", kurtosis_value))
+##aic_normal <- AIC(MASS::fitdistr(train[[col_name]],                                 "normal"))
+
+#aic_unif <- AIC(MASS::fitdistr(train[[col_name]], "uniform"))
+
+#data.frame(Distribution=c("Normal", "t (df=3)", "Uniform"), AIC=c(aic_normal, aic_t, aic_unif))
+
+
+
+```
+#### check distribution
+```{r}
+compare_distribution<-function(){
+  tmp_y <- train |> 
+    mutate(tmp_y = listening_time_minutes+1) |>
+    pull(tmp_y)
+  
+  norm_fit <- MASS::fitdistr(tmp_y, 'normal')
+  lognorm_fit <- MASS::fitdistr(1+tmp_y, 'lognormal')
+  #beta_fit <- MASS::fitdistr(rescale(tmp_y,to=c(0,1)),'',shape1=1.2, shape2=2.3)
+  AIC(norm_fit, lognorm_fit)
+}
+compare_distribution()
+```
+
+
 ### check the predict with response
 #### podcast_name
 ```{r}
-train|>
-  ggplot(aes(x=podcast_name,y=listening_time_minutes)) +
-  geom_col()
-train|>count(podcast_name,wt=listening_time_minutes,sort=TRUE)
-```
+col_name <- 'podcast_name'
+# train|>
+#   ggplot(aes(x=podcast_name,y=listening_time_minutes)) +
+#   geom_col()
+# train|>count(podcast_name,wt=listening_time_minutes,sort=TRUE)
 
+  train |> 
+   mutate(
+    podcast_name = case_when(
+      podcast_name %in% c("Fitness First", "Health Hour", "Healthy Living", 
+                         "Mind & Body", "Wellness Wave", "Life Lessons") ~ "Health & Wellness",
+      podcast_name %in% c("Business Briefs", "Business Insights", "Finance Focus",
+                         "Market Masters", "Money Matters", "Innovators") ~ "Business & Finance",
+      podcast_name %in% c("Current Affairs", "Daily Digest", "Global News",
+                         "News Roundup", "World Watch", "Digital Digest") ~ "News & Current Affairs",
+      podcast_name %in% c("Comedy Corner", "Funny Folks", "Humor Hub",
+                         "Joke Junction", "Laugh Line") ~ "Comedy & Entertainment",
+      podcast_name %in% c("Gadget Geek", "Tech Talks", "Tech Trends",
+                         "Style Guide", "Home & Living") ~ "Technology & Innovation",
+      podcast_name %in% c("Athlete's Arena", "Game Day", "Sport Spot",
+                         "Sports Central", "Sports Weekly") ~ "Sports",
+      podcast_name %in% c("Brain Boost", "Educational Nuggets", "Learning Lab",
+                         "Study Sessions", "Detective Diaries") ~ "Education & Learning",
+      podcast_name %in% c("Fashion Forward", "Home & Living") ~ "Lifestyle & Culture",
+      podcast_name %in% c("Crime Chronicles", "Criminal Minds", "Mystery Matters",
+                         "True Crime Stories", "Sound Waves") ~ "Crime & Mystery",
+      TRUE ~ "Other"
+    )
+  )|>
+    plot_column_eda(col_name)
+
+
+
+
+```
+After transfor the type into less category with AI assistant, I still can not found any significant difference between different podcast_name
 #### episode_title(***)
 ```{r}
-train|>mutate(episode_id =as.integer(str_replace(
+original_col_name <- 'episode_title'
+col_name = 'episode_id'
+train|>mutate('{col_name}':=as.integer(str_replace(
   episode_title,
   'Episode ','')))|>
-  ggplot(aes(x=episode_id,y=listening_time_minutes)) +
-  geom_smooth()
-train|>mutate(episode_id =str_replace(
-  episode_title,
-  'Episode ',''))|>count(episode_id,wt=listening_time_minutes,sort=TRUE)
+  plot_column_eda(col_name)
 ```
-episode_title transformat to episode id will improve the models 
+episode_title transformat to episode id will improve the models.
+the episode_it has non-linear relationship with the listentime.
 
-#### episode_length_minutes 
+#### episode_length_minutes (***)
 ```{r}
-train|>
-  ggplot(aes(x=episode_length_minutes,y=listening_time_minutes)) +
- 
-  geom_smooth()
-
-train|>
-  ggplot(aes(x=episode_length_minutes)) +
-  geom_density()
+col_name <- 'episode_length_minutes'
+plot_column_eda(train, col_name)
+test|>filter(episode_length_minutes>121) 
 ```
 the episode_length_minutes is highly related to the listen time but it has boundary (lower and upper). that's say it is 4 and 121
 #### genre 
-#### host_popularity_percentage 
-#### publication_day 
+```{r}
+col_name <- 'genre'
+
+plot_column_eda(train,col_name)
+```
+#### host_popularity_percentage
+```{r}
+col_name <- 'host_popularity_percentage'
+
+plot_column_eda(train,col_name)
+```
+look the host_popularity_percentage has some non-linear relationship with listening time.
+
+#### publication_day
+```{r}
+col_name='publication_day'
+train|>
+  mutate(publication_day = case_when(publication_day =='Monday'~1,
+                                     publication_day =='Tuesday'~2,
+                                     publication_day =='Wednesday'~3,
+                                     publication_day =='Thursday'~4,
+                                     publication_day =='Friday'~5,
+                                     publication_day =='Saturday'~6,
+                                     publication_day =='Sunday'~7))|>
+ggplot(aes(x=publication_day, y=listening_time_minutes)) +
+  geom_area()
+plot_column_eda(train, col_name)
+```
+
 #### publication_time 
+```{r}
+col_name='publication_time'
+train|>
+  mutate(publication_time = case_when(publication_time =='Morning'~0,
+                                          publication_time =='Afternoon'~1,
+                                         publication_time =='Evening'~2,
+                                         publication_time =='Night'~3,
+                                         TRUE~ 4))|>
+ggplot(aes(x=publication_time, y=listening_time_minutes)) +
+  geom_area()
+```
+
+```{r}
+col_name <-'dt'
+train|>
+  select(publication_day,publication_time,listening_time_minutes)|>
+  mutate(dt = paste0(publication_day,publication_time))|>
+  plot_column_eda(col_name)
+```
+
 #### guest_popularity_percentage 
-#### number_of_ads 
+```{r}
+col_name <- 'guest_popularity_percentage'
+plot_column_eda(train,col_name)
+```
+
+#### number_of_ads (*** bad data, extremely value)
+```{r}
+col_name <- 'number_of_ads'
+plot_column_eda(train, col_name)
+test|>count(number_of_ads)
+```
+found both test and train has extremely value. Remove it manully
 #### episode_sentiment 
+```{r}
+col_name <- 'episode_sentiment'
+plot_column_eda(train, col_name)
+```
 #### listening_time_minutes
+```{r}
+col_name <- 'listening_time_minutes'
+plot_column_eda(train, col_name)
+```
 
 ### outlier detect base on train & test
 ```{r fig.height=3, fig.width=5}
@@ -212,9 +388,9 @@ Thus, we can believe they are same distribution
 set.seed(1234)
 #train <- ts_df |> as_tibble() |>filter(source=='train')|>select(-source)
 #df_split <- initial_time_split(train, prop = 0.8)
-od_train <- train |>get_outliers()  |>bind_cols(train)
-od_test <- test|>get_outliers()  |>bind_cols(test)
-df_split <- initial_split(train, prop = 0.3, strata =listening_time_minutes )
+od_train <- train |>get_outliers()|>select(score_pctl)  |>bind_cols(train)
+od_test <- test|>get_outliers()  |>select(score_pctl) |>bind_cols(test)
+df_split <- initial_split(od_train, prop = 0.7, strata =listening_time_minutes )
 train_set <- training(df_split)
 test_set <- testing(df_split)
 cv_folds <- vfold_cv(train_set,
@@ -229,7 +405,13 @@ cv_folds <- vfold_cv(train_set,
 ```{r}
 rcp_bs <-
   recipe(listening_time_minutes ~ ., data = train_set) |>
-  update_role(id, new_role='ID')
+  update_role(id, new_role='ID')|>
+  step_mutate(  episode_length_minutes  = ifelse(episode_length_minutes  >= 0 & episode_length_minutes  <= 121,
+                                                episode_length_minutes , 
+                                                NA),
+                number_of_ads  = ifelse(number_of_ads  >= 0 & number_of_ads  <= 5,
+                                                number_of_ads , 
+                                                NA))
 
 ```
 
@@ -238,46 +420,120 @@ rcp_bs <-
 rcp_bs_v0 <-
   rcp_bs|> #step_rm(date,year_offset)|>
   step_impute_median(all_numeric_predictors())|> 
-
-  step_YeoJohnson(all_numeric_predictors()) |>
-  step_bin2factor(all_logical_predictors())|>
-  step_novel(all_nominal_predictors())|>
-  step_unknown(all_nominal_predictors()) |>
-  step_other(all_nominal_predictors())|>
-  step_dummy(all_nominal_predictors(),one_hot = TRUE) |>
-  step_nzv(all_predictors())|>
-  step_corr(all_numeric_predictors())|>
+  #step_log(listening_time_minutes, offset=1,skip=TRUE) |>
+  step_rm(all_nominal())|>
+  step_zv(all_predictors())|>
+  #step_corr(all_numeric_predictors())|>
   step_normalize(all_numeric_predictors())|> 
   check_missing(all_predictors())
 ```
 
-#### 4.1 v1 adv + episodeid + length
+#### 4.1 v1 adv + episodeid + length +
 ```{r}
 rcp_bs_v1 <-
-  rcp_bs|> #step_rm(date,year_offset)|>
+  rcp_bs|> 
   step_impute_median(all_numeric_predictors())|> 
   step_mutate(
-    episode_id =as.integer(str_replace( episode_title, 'Episode ','')),
-    length_normal = case_when(episode_length_minutes<5~-1, # too short
+    episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')),
+    length_normal = case_when(episode_length_minutes<1~-1, # too short
+                              episode_length_minutes>120~1, # too long
+                              .default=0),# normal length
+    number_of_ads=as_factor(number_of_ads),
+    noad =case_when(number_of_ads==0~1, .default=1)
+    )|>
+  step_bs(episode_length_minutes,
+          episode_id,
+          host_popularity_percentage,
+          guest_popularity_percentage)|>
+  step_mutate(podcast_name = case_when(
+    podcast_name %in% c("Fitness First", "Health Hour", "Healthy Living", 
+                        "Mind & Body", "Wellness Wave", "Life Lessons") ~ "Health & Wellness",
+    podcast_name %in% c("Business Briefs", "Business Insights", "Finance Focus",
+                        "Market Masters", "Money Matters", "Innovators") ~ "Business & Finance",
+    podcast_name %in% c("Current Affairs", "Daily Digest", "Global News",
+                        "News Roundup", "World Watch", "Digital Digest") ~ "News & Current Affairs",
+    podcast_name %in% c("Comedy Corner", "Funny Folks", "Humor Hub",
+                        "Joke Junction", "Laugh Line") ~ "Comedy & Entertainment",
+    podcast_name %in% c("Gadget Geek", "Tech Talks", "Tech Trends",
+                        "Style Guide", "Home & Living") ~ "Technology & Innovation",
+    podcast_name %in% c("Athlete's Arena", "Game Day", "Sport Spot",
+                        "Sports Central", "Sports Weekly") ~ "Sports",
+    podcast_name %in% c("Brain Boost", "Educational Nuggets", "Learning Lab",
+                        "Study Sessions", "Detective Diaries") ~ "Education & Learning",
+    podcast_name %in% c("Fashion Forward", "Home & Living") ~ "Lifestyle & Culture",
+    podcast_name %in% c("Crime Chronicles", "Criminal Minds", "Mystery Matters",
+                        "True Crime Stories", "Sound Waves") ~ "Crime & Mystery",
+    TRUE ~ "Other" ),
+    podcast_name = forcats::as_factor(podcast_name))|>
+  step_dummy(#genre, podcast_name,
+             publication_day, publication_time, 
+             episode_sentiment,one_hot = FALSE) %>%  # 虚拟编码（非满秩）
+  
+  #step_interact(~ starts_with("genre"):starts_with("publication_day"))|> 
+  #step_interact(~ starts_with("genre"):starts_with("publication_time"))|> 
+  step_rm(all_nominal())|>
+  # step_bin2factor(all_logical_predictors())|>
+  # step_novel(all_nominal_predictors())|>
+  # step_unknown(all_nominal_predictors()) |>
+  # step_other(all_nominal_predictors())|>
+  # step_dummy(all_nominal_predictors(),one_hot = TRUE) |>
+  step_zv(all_predictors())|>
+  #step_corr(all_numeric_predictors())|>
+  step_normalize(all_numeric_predictors())|> 
+  check_missing(all_predictors())
+```
+
+#### 4.2 v2 podcast target encoding
+```{r}
+rcp_bs_v2 <-
+  rcp_bs|> 
+  step_lencode_mixed(
+    podcast_name,        # 分类变量名
+    outcome = vars(listening_time_minutes)#,  # 目标变量
+    #smoothing = 10       # 平滑参数（控制过拟合）
+  ) |>
+  step_mutate(
+    episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')))|>
+  step_impute_linear(episode_length_minutes,,
+                     guest_popularity_percentage,
+                     impute_with = imp_vars(podcast_name,
+                                            episode_id,
+                                            publication_day,
+                                            publication_time,))|> 
+  step_impute_median(all_numeric_predictors())|>
+  step_mutate(x1 = episode_length_minutes * host_popularity_percentage,
+              x2 = episode_length_minutes * guest_popularity_percentage)|>
+  step_mutate(
+   # episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')),
+    length_normal = case_when(episode_length_minutes<1~-1, # too short
                               episode_length_minutes>120~1, # too long
                               .default=0),# normal length
     noad =case_when(number_of_ads==0~1, .default=1))|>
-  step_rm(episode_title)|>
-  step_YeoJohnson(all_numeric_predictors()) |>
-  step_bin2factor(all_logical_predictors())|>
-  step_novel(all_nominal_predictors())|>
-  step_unknown(all_nominal_predictors()) |>
-  step_other(all_nominal_predictors())|>
-  step_dummy(all_nominal_predictors(),one_hot = TRUE) |>
-  step_nzv(all_predictors())|>
-  step_corr(all_numeric_predictors())|>
+  #step_log(number_of_ads,offset=1) |>
+  step_ns(episode_id,#guest_popularity_percentage,
+          number_of_ads)|>
+  step_bs(episode_length_minutes)|>
+  step_dummy(#genre, podcast_name,
+             publication_day, publication_time, 
+             episode_sentiment,one_hot = FALSE) %>%  # 虚拟编码（非满秩）
+  
+  #step_interact(~ starts_with("genre"):starts_with("publication_day"))|> 
+  #step_interact(~ starts_with("genre"):starts_with("publication_time"))|> 
+  step_rm(all_nominal())|>
+  # step_bin2factor(all_logical_predictors())|>
+  # step_novel(all_nominal_predictors())|>
+  # step_unknown(all_nominal_predictors()) |>
+  # step_other(all_nominal_predictors())|>
+  # step_dummy(all_nominal_predictors(),one_hot = TRUE) |>
+  step_zv(all_predictors())|>
+  #step_corr(all_numeric_predictors())|>
   step_normalize(all_numeric_predictors())|> 
   check_missing(all_predictors())
 ```
 ##### diagnose
 ```{r}
-tmp_rcp<- rcp_bs_v1|>prep()|>juice()
-tmp_rcp |> names()
+tmp_rcp<- rcp_bs_v2|>prep()|>juice()
+tmp_rcp |> glimpse()
 ```
 
 
@@ -288,19 +544,29 @@ set.seed(1234)
 library(future)
 library(furrr)
 selected_rcps <- list(bs=rcp_bs_v0,
-                      v1=rcp_bs_v1)
+                      v1=rcp_bs_v1,
+                      v2=rcp_bs_v2)
 plan(multisession,workers = 5)
 #selected_rcps|>map(\(rcp_item) rcp_item|>prep()|>bake(new_data=train_set)|>summary())
 plan(sequential)
 ```
 
 ### 5. Model Specification ----
+#### beta engine
+```{r}
+
+```
+
+other engine
 
 ```{r}
 
 lm_eng <-linear_reg() %>%
   set_mode("regression") %>%
   set_engine("lm")
+
+
+
 glmnet_eng <- 
  linear_reg(penalty = 0.0129155,
                mixture = 0.2222222) |>  # Example penalty and mixture values
@@ -312,12 +578,12 @@ glm_eng <-
   set_mode("regression")    # Specify regression
 lgbm_eng<-
    parsnip::boost_tree(
-      trees = 500, # Number of trees
-      learn_rate = 0.01,
-      tree_depth =5,
-      loss_reduction = 0.001,
+      trees = 300, # Number of trees
+      learn_rate = 0.5,
+     # tree_depth =5,
+      loss_reduction = 0.1,
       stop_iter = 50,
-      sample_size = 0.9, # Added sample_size
+      #sample_size = 0.9, # Added sample_size
       #tree_depth = tune(),
       #mtry = 0.5,
       min_n = 100
@@ -325,26 +591,26 @@ lgbm_eng<-
    set_mode("regression")|>
    set_engine("lightgbm",
               #metric='roc_auc', 
-              num_leaves = 20,
-              counts = FALSE,
-              num_threads=12,
-              metric = "auc",              # 优化目标
+              #num_leaves = 20,
+              #counts = FALSE,
+              num_threads = 12,
+              metric = "rmse",              # 优化目标
               # reg_alpha=0.01,
               # reg_lambda = 0.5,
               verbose=1) 
 
-rf_eng<- rand_forest( trees = 700, 
+rf_eng<- rand_forest( trees = 300, 
                       #mtry=100, 
                       min_n=100) |>
   set_engine("ranger",num.threads=4)|>
   set_mode("regression") 
 
-xgb_eng<- parsnip::boost_tree( trees = 500, 
-                      learn_rate = 0.01,
-                      loss_reduction = 0.001,
-                      sample_size = 0.8, # Added sample_size
+xgb_eng<- parsnip::boost_tree( trees = 300, 
+                      learn_rate = 0.5,
+                      loss_reduction = 0.01,
+                      #sample_size = 0.8, # Added sample_size
                       #mtry=tune(),
-                      min_n=70) |>
+                      min_n=100) |>
   set_engine("xgboost",num.threads=8)|>
   set_mode("regression")
 #[1] "use_C5.0"             "use_cubist"           "use_earth"            "use_glmnet"           "use_kernlab_svm_poly" "use_kernlab_svm_rbf" 
@@ -370,16 +636,17 @@ kknn_eng <-
   set_mode("regression") %>% 
   set_engine("kknn") 
 
-selected_eng <- list(glm=glm_eng,
+selected_eng <- list(
+                     #glm=glm_eng,
                      glmnet=glmnet_eng,
-                     # rf=rf_eng,
-                     # lgbm=lgbm_eng,
-                     # xgb=xgb_eng,
-                     # #c50=c50_eng,
-                     # earth= earth_eng,
+                     #rf=rf_eng,
+                     lgbm=lgbm_eng,
+                     #gb=xgb_eng
+                     #  #c50=c50_eng,
+                     #  earth= earth_eng
                      # #kknn=kknn_eng,
-                     svm=svm_eng
-                     
+                     #svm=svm_eng
+                     lm=lm_eng
                      )
 
 ```
@@ -387,7 +654,56 @@ selected_eng <- list(glm=glm_eng,
 ### 6. Workflow ----
 #### set metrics
 ```{r}
-rmse_metrics <- metric_set(rmse) # main goal is roc_auc, accuracy is just for reference
+rmse_metrics <- metric_set(yardstick::rmse) # main goal is roc_auc, accuracy is just for reference
+
+get_augment <- function(wf, tr = train_set){
+  
+  train_pred <- predict(wf, new_data = tr)  # 替换为你的训练数据
+  #train_resid <- residuals(wf, new_data = tr)
+  
+  augmented_data <- 
+    bind_cols(tr, train_pred) |>
+    mutate(.resid =  listening_time_minutes-.pred) 
+    
+  return(augmented_data)
+  
+}
+
+diag_mod_fit <- function(wf){
+ 
+  aug_df <- get_augment(wf)
+  fit_mod <- wf|>extract_fit_engine()
+  if (class(fit_mod)!='lm'){
+      rmse_result <-
+        aug_df|>
+        yardstick::rmse(estimate = .pred,
+                        truth =listening_time_minutes)
+      print(rmse_result)
+  } else{
+    print( fit_mod |> glance())  
+    print( fit_mod |> tidy())  
+  }
+
+  p1 <- 
+    aug_df |>
+    select(id, .pred,actual_y=listening_time_minutes)|>
+    pivot_longer(cols=-id, names_transform = list(name = as.factor) ) |>
+    ggplot(aes(x = value, fill = name)) +
+    geom_density(alpha = 0.5) +  # Semi-transparent densities
+    labs(title = "Density Plot: Predicted vs. Actual",
+       x = "Value", y = "Density", fill = "Variable") +
+    theme_classic()
+  p2 <-
+    aug_df |>
+    select(id, .resid,actual_y=listening_time_minutes)|>
+    ggplot(aes(x=actual_y, y=.resid)) +
+    geom_smooth() +
+    geom_area()+
+    theme_classic()
+  plt <- p1 /p2 
+  #scale_fill_manual(values = c(".pred" = "blue", "actual_y" = "green"))  # Custom colors
+  return(plt)
+}
 ```
 
 #### simple wflow
@@ -400,36 +716,52 @@ simple_wf_fit <-
   add_recipe(rcp_bs_v1) |>
   add_model(lm_eng)|>
   fit(train_set)
-simple_wf_fit |> glance()
-  #fit_resamples(cv_folds,
-  #        control = control_resamples(verbose=TRUE),
-  #         metrics=rmse_metrics)
-  #simple_wf_fit |> collect_metrics() 
+  
+#simple_wf_fit |> glance()
+ # fit_resamples(cv_folds,
+ #         control = control_resamples(verbose=TRUE),
+ #          metrics=rmse_metrics)
+ # simple_wf_fit |> collect_metrics()
+diag_mod_fit(simple_wf_fit)
 ```
 
 #### simple workflowset
 
 ```{r}
 set.seed(1234)
+library(stacks)
 library(future)
-plan(multisession,workers = 16)
-ctrl <- control_resamples(save_pred = TRUE, save_workflow = TRUE,verbose=TRUE)
+plan(multisession,workers = 12)
+
+ctrl <- control_resamples(save_pred = TRUE, 
+                          save_workflow = FALSE,
+                          verbose=TRUE,
+                          pkgs = c("recipes", 
+                                   "parsnip",
+                                   "yardstick",
+                                   'lightgbm',
+                                   'stringr',
+                                   'forcats')  # Critical for parallel # 
+                          )
+
 wfs_result <-
   workflow_set(preproc = selected_rcps,
                models = selected_eng,
                cross=TRUE) |>
+  option_add(
+    control = control_stack_resamples(),
+    metrics = rmse_metrics  ) |>
   workflow_map(fn='fit_resamples',
                #resamples = vfold_cv(od_train, v = 10,strata = rainfall) ,
                resamples =cv_folds,
-               metrics =rocauc_metrics,
-               control = ctrl
+               #metrics =rmse_metrics,
+               #control = ctrl
                )
 wfs_result|> 
   collect_metrics()  |>
-  filter(.metric=='roc_auc')|>
+  filter(.metric=='rmse')|>
   select(wflow_id, model, .metric,mean, n, std_err
          )
-  
 plan(sequential)
 ```
 
@@ -438,11 +770,16 @@ plan(sequential)
 ```{r}
 set.seed(1234)
 library(future)
-plan(multisession,workers = 4)
+
+plan(multisession,workers = 12)
+
 combined_fit <-
   stacks::stacks()|>
   stacks::add_candidates(wfs_result)|>
-  stacks::blend_predictions()|>
+  stacks::blend_predictions(
+    penalty = 10^seq(-2, 0.5, length = 20),  # Regularization
+    lower_bound = 0,   # Force non-negative coefficients
+    upper_bound = 120)     # Cap contributions at 100%)|>
   stacks::fit_members()
 
 combined_fit|>
