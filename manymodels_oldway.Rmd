@@ -1,0 +1,75 @@
+---
+title: "manymodels_oldway"
+output: html_document
+---
+
+
+## librar y & load_data
+
+### library
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(finetune)
+library(future)
+library(purrr)
+library(furrr)
+library(textrecipes)
+library(themis)
+library(embed)
+library(tailor)
+
+
+library(bonsai)
+library(lightgbm)
+library(xgboost)
+library(ranger)
+library(betareg)
+library(readr)
+library(janitor)
+library(lubridate)
+
+library(memoise)
+dk_cach <- memoise::cache_filesystem('./cache')
+```
+### download to local
+```{r}
+competition_name <- 'playground-series-s5e4'
+data_path <- file.path('../input',competition_name)
+target_name <- 'listening_time_minutes'
+# system(paste0('kaggle competitions  download -c ', competition_name))
+# unzip(paste0(competition_name,'.zip'),exdir=file.path('../input',competition_name))
+# file.remove(paste0(competition_name,'.zip'))
+```
+
+
+### loading data
+
+```{r}
+
+train<- 
+  readr::read_csv(file.path(data_path, 'train.csv'),
+                  show_col_types = FALSE)|>
+  janitor::clean_names()
+test <- 
+  readr::read_csv(file.path(data_path, 'test.csv'),
+                  show_col_types = FALSE)|>
+   janitor::clean_names()
+submission <-  readr::read_csv(file.path(data_path, 'sample_submission.csv'),show_col_types = FALSE)
+```
+
+```{r}
+mm_fit <- train|>
+  #filter(podcast_name %in% c("Athlete's Arena", "Brain Boost", "Business Briefs", "Business Insights", "Comedy Corner", "Crime Chronicles"))|>
+  nest(.by=podcast_name)|>
+  mutate(models = lapply(data, function(df) lm(listening_time_minutes ~ number_of_ads +guest_popularity_percentage +host_popularity_percentage+ episode_length_minutes  , data = df)))|>
+  mutate(glance = map(models, broom::glance)) %>% 
+  unnest(glance) 
+```
+
+```{r}
+mm_fit |> ggplot(aes(x=sigma, y= adj.r.squared)) +geom_jitter()
+
+```
+

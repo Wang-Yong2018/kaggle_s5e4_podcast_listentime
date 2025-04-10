@@ -59,6 +59,7 @@ library(furrr)
 library(textrecipes)
 library(themis)
 library(embed)
+library(tailor)
 
 
 library(bonsai)
@@ -96,8 +97,7 @@ test <-
   readr::read_csv(file.path(data_path, 'test.csv'),
                   show_col_types = FALSE)|>
    janitor::clean_names()
-submission <-  readr::read_csv(file.path(data_path, 'sample_submission.csv'),show_col_types = FALSE)|>
-   janitor::clean_names()
+submission <-  readr::read_csv(file.path(data_path, 'sample_submission.csv'),show_col_types = FALSE)
 ```
 
 ### quick skim
@@ -390,7 +390,8 @@ set.seed(1234)
 #df_split <- initial_time_split(train, prop = 0.8)
 od_train <- train |>get_outliers()|>select(score_pctl)  |>bind_cols(train)
 od_test <- test|>get_outliers()  |>select(score_pctl) |>bind_cols(test)
-df_split <- initial_split(od_train, prop = 0.7, strata =listening_time_minutes )
+# df_split <- initial_split(od_train, prop = 0.7, strata =listening_time_minutes )
+df_split <- initial_split(od_train, prop = 0.7, strata =podcast_name)
 train_set <- training(df_split)
 test_set <- testing(df_split)
 cv_folds <- vfold_cv(train_set,
@@ -532,8 +533,8 @@ rcp_bs_v2 <-
 ```
 ##### diagnose
 ```{r}
-tmp_rcp<- rcp_bs_v2|>prep()|>juice()
-tmp_rcp |> glimpse()
+#tmp_rcp<- rcp_bs_v2|>prep()|>juice()
+#tmp_rcp |> glimpse()
 ```
 
 
@@ -711,18 +712,22 @@ diag_mod_fit <- function(wf){
 ```{r}
 set.seed(1234)
 
+tailor_rng <- tailor() |>
+  adjust_numeric_range()
 simple_wf_fit <- 
   workflow() |>
   add_recipe(rcp_bs_v1) |>
   add_model(lm_eng)|>
-  fit(train_set)
+  #add_tailor(tailor_rng)
+ # fit(train_set)
   
 #simple_wf_fit |> glance()
- # fit_resamples(cv_folds,
- #         control = control_resamples(verbose=TRUE),
- #          metrics=rmse_metrics)
- # simple_wf_fit |> collect_metrics()
-diag_mod_fit(simple_wf_fit)
+  fit_resamples(cv_folds,
+          control = control_resamples(verbose=TRUE),
+           metrics=rmse_metrics)
+  simple_wf_fit |> collect_metrics()
+  
+#diag_mod_fit(simple_wf_fit)
 ```
 
 #### simple workflowset
@@ -1057,7 +1062,10 @@ plan(sequential)
 
  # Save submission file
  submission |>
+   mutate(Listening_Time_minutes =case_when(Listening_Time_minutes>0~Listening_Time_minutes,
+                                            TRUE ~0)) |>
    #mutate(rainfall=final_predictions$.pred_1)|>
+   
    readr::write_csv("submission.csv")
  zip('submission.csv.zip','submission.csv')
  
@@ -1070,7 +1078,7 @@ plan(sequential)
 ### score submit
 ```{r}
 # submit latest submission.csv
-system('kaggle competitions submit -c playground-series-s5e4 -f submission.csv.zip -m "samplesubmission as initial rmse "')
+system('kaggle competitions submit -c playground-series-s5e4 -f submission.csv.zip -m "local cv3 score 13.45497 + post remove value <0 to 0"')
 
 Sys.sleep(15)
 # get latest score 
