@@ -70,6 +70,7 @@ library(betareg)
 library(readr)
 library(janitor)
 library(lubridate)
+library(betareg)
 
 library(memoise)
 dk_cach <- memoise::cache_filesystem('./cache')
