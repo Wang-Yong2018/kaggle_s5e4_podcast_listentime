@@ -18,7 +18,7 @@ library(furrr)
 library(textrecipes)
 library(themis)
 library(embed)
-library(tailor)
+#library(tailor)
 
 
 library(bonsai)
@@ -59,8 +59,16 @@ test <-
 submission <-  readr::read_csv(file.path(data_path, 'sample_submission.csv'),show_col_types = FALSE)
 ```
 
+### data nest 
 ```{r}
-mm_fit <- train|>
+tr <- train |> nest()
+```
+
+
+
+```{r}
+
+mm_fit <- train|>head()
   #filter(podcast_name %in% c("Athlete's Arena", "Brain Boost", "Business Briefs", "Business Insights", "Comedy Corner", "Crime Chronicles"))|>
   nest(.by=podcast_name)|>
   mutate(models = lapply(data, function(df) lm(listening_time_minutes ~ number_of_ads +guest_popularity_percentage +host_popularity_percentage+ episode_length_minutes  , data = df)))|>
@@ -71,5 +79,20 @@ mm_fit <- train|>
 ```{r}
 mm_fit |> ggplot(aes(x=sigma, y= adj.r.squared)) +geom_jitter()
 
+```
+```{r}
+te <- test |>head()
+  nest(.by=podcast_name)|>
+  select(podcast_name, te_data = data ) 
+combined <- left_join(te,mm_fit, by='podcast_name')
+
+```
+```{r}
+get_predict <- function(mod, data){
+  
+}
+combined |> head() |>
+  mutate(.pred=map2(models, te_data, predict)) -> tmp_pred
+tmp_pred
 ```
 
