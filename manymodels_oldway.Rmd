@@ -15,9 +15,9 @@ library(finetune)
 library(future)
 library(purrr)
 library(furrr)
-library(textrecipes)
+#library(textrecipes)
 library(themis)
-library(embed)
+#library(embed)
 #library(tailor)
 
 
@@ -25,7 +25,7 @@ library(bonsai)
 library(lightgbm)
 library(xgboost)
 library(ranger)
-library(betareg)
+#library(betareg)
 library(readr)
 library(janitor)
 library(lubridate)
@@ -59,12 +59,15 @@ test <-
   janitor::clean_names()
 submission <- readr::read_csv(file.path(data_path, "sample_submission.csv"), show_col_types = FALSE)
 ```
+
+### get_outlier
 ```{r}
 
-library(applicable)
-library(isotree)
+
 
 internal_get_outliers <- function(od_target){
+  library(applicable)
+  library(isotree)
   remove_cols <- c('id','listening_time_minutes')
   od_tr <- od_target |> select(-any_of(remove_cols))
   #od_te <- od_target |>  select(-any_of(remove_cols))
@@ -91,30 +94,34 @@ te <- test |>
 
 
 ```{r}
-
+plt_density <- function(df,col_name='listening_time_minutes'){
+  
+  df|>
+    ggplot(aes(x=.data[[col_name]])) + geom_density(alpha=0.5)+ theme_classic()
+           
+}
 
 get_rcp <- function(df) {
   rcp <-
-    recipe(listening_time_minutes ~
-           episode_length_minutes
-            +host_popularity_percentage
-            #+guest_popularity_percentage
-            +number_of_ads
-           # #+podcast_name 
-           # +episode_title
-           # +genre
-           # +publication_day
-           # +publication_time
-           +episode_sentiment
-           +score_pctl,
+    recipe(listening_time_minutes ~.,
+           # episode_length_minutes
+           #  +host_popularity_percentage
+           #  #+guest_popularity_percentage
+           #  +number_of_ads
+           # # #+podcast_name 
+           # # +episode_title
+           # # +genre
+           # # +publication_day
+           # # +publication_time
+           # +episode_sentiment
+           # +score_pctl,
            data = df) |>
-    #update_role(id, new_role='ID')|>
+    update_role(id, new_role='ID')|>
     #step_sqrt(listening_time_minutes, skip=TRUE)|>
-    step_mutate(
-      
-      listening_time_minutes=rescale(listening_time_minutes,to=c(0,1),from=c(0,120)),
-      listening_time_minutes = (listening_time_minutes*(n-1) + 0.5)/n, # should be larget than 0 and less than 1
-      skip=TRUE)|>
+    #step_mutate(
+      #listening_time_minutes=rescale(listening_time_minutes,to=c(0,1),from=c(0,120)),
+      #listening_time_minutes = (listening_time_minutes*(n-1) + 0.5)/n, # should be larget than 0 and less than 1
+      #skip=TRUE)|>
     #step_log(listening_time_minutes, offset=1, skip=TRUE)|>
     #step_mutate(score_pctl = get_outliers(.x))|>
     step_mutate(episode_length_minutes  = ifelse(episode_length_minutes  >= 0 & episode_length_minutes  <= 121,
@@ -122,9 +129,9 @@ get_rcp <- function(df) {
                                                 NA),
                 number_of_ads  = ifelse(number_of_ads  >= 0 & number_of_ads  <= 5,
                                                 number_of_ads , 
-                                                NA))|>
+                                                'NA'))|>
    
-    step_impute_median(all_numeric_predictors()) |>
+    step_impute_bag(all_numeric_predictors(),impute_with = imp_vars(number_of_ads,publication_day, publication_time, genre)) |>
     step_impute_mode(all_nominal_predictors()) |>
   #  step_mutate(#episode_id =readr::parse_number(episode_title))|>
   #  episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')))|>  
@@ -205,7 +212,7 @@ get_mod <- function(df,return_type='resample') {
   # 4. Bundle into a Workflow
   lm_workflow <- workflow() %>% 
     add_recipe(lm_recipe) %>% 
-    add_model(lgbm_eng)
+    add_model(lm_model)
   
   if (return_type == "resample") {
     result <- lm_workflow |>
@@ -237,9 +244,10 @@ get_predict<- function(wf,newdata,target_type='non'){
 
   return(.pred)
 }
+```
 
 
-
+```{r}
 mm_fit <- tr |>
   mutate(cv_data = map(data, ~get_mod(.x),.progress = TRUE),
          model = map(data, ~get_mod(.x,return_type='fit'),.progress = TRUE),)|>
@@ -256,23 +264,64 @@ library(patchwork)
 mm_fit <- 
   mm_fit|> 
   rowwise()|> mutate(true = list(pluck(data, 'listening_time_minutes')))|>
-  mutate(.pred=list(get_predict(model, data, target_type = 'beta'))) |>
-  rowwise()|>mutate(rmse_score = yardstick::rmse_vec(truth=true, estimate=.pred))
+  mutate(.pred=list(get_predict(model, data, target_type = 'none'))) |>
+  rowwise()|>mutate(rmse_score = yardstick::rmse_vec(truth=true, estimate=.pred$.pred
+                                                     ))
 
 tmp_true <- mm_fit |> pluck('true',1)
-tmp_pred <- mm_fit |> pluck('.pred',1)
+tmp_pred <- mm_fit |> pluck('.pred',1,1)
 tmp_target <- tibble("true"=tmp_true, "pred"=tmp_pred)
 tmp_target |> 
   pivot_longer(cols=everything())|>
   ggplot(aes(x=value,color=name))+geom_density()
 
-tmp_mod <- mm_fit$model[[1]] |>extract_fit_engine()
+Dtmp_mod <- mm_fit$model[[1]] |>extract_fit_engine()
 #tmp_mod |> tidy()
 #tmp_mod|>glance()
 #mm_fit|> rowwise()|>mutate(true = list(select(data, listening_time_minutes))) |> mutate(.pred=list(get_predict(model, data))) 
 #tmp_mod |>autoplot()
 ```
 
+## betaregression check
+### compare the response variable distribution
+```{r}
+
+library(betareg)
+library(fitdistrplus)
+
+get_fitdist_info<-function(df, col_name='listening_time_minutes'){
+  
+ original_y <- df[[col_name]]
+ y <- original_y  / 120 +0.001/120  # 缩放到 [0,1]
+ stringr::str_glue('the lisenting time value range is {min(original_y)}--{max(original_y)} (minutes)')
+
+ # (1) 正态分布拟合
+ fit_normal <- fitdist(y, "norm")
+
+  # (2) Beta 分布（需要缩放到 0~1）
+  fit_beta <- fitdist(y, "beta", method = "mme")  # 矩估计法
+  
+  # (3) Gamma 分布
+  fit_gamma <- fitdist(y, "gamma")
+  
+  # (4) 对数正态分布（如果 y > 0）
+   fit_lnorm <- fitdist(y, "lnorm")
+  
+  # 比较AIC 
+  gof_stats <- gofstat(list(fit_normal, fit_beta, fit_gamma, fit_lnorm),
+                     fitnames = c("Normal", "Beta", "Gamma", "Lognormal"))
+   print(gof_stats)
+  # par(mfrow = c(2, 2))
+  # plot(fit_normal, main = "Normal")
+  # plot(fit_beta, main = "Beta")
+  # plot(fit_gamma, main = "Gamma")
+  # plot(fit_lnorm, main = "Lognormal")
+   
+}
+
+
+get_fitdist_info()
+```
 
 
 # predict
