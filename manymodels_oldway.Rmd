@@ -47,52 +47,250 @@ target_name <- 'listening_time_minutes'
 ### loading data
 
 ```{r}
-
-train<- 
-  readr::read_csv(file.path(data_path, 'train.csv'),
-                  show_col_types = FALSE)|>
+train <-
+  readr::read_csv(file.path(data_path, "train.csv"),
+    show_col_types = FALSE
+  ) |>
   janitor::clean_names()
-test <- 
-  readr::read_csv(file.path(data_path, 'test.csv'),
-                  show_col_types = FALSE)|>
-   janitor::clean_names()
-submission <-  readr::read_csv(file.path(data_path, 'sample_submission.csv'),show_col_types = FALSE)
+test <-
+  readr::read_csv(file.path(data_path, "test.csv"),
+    show_col_types = FALSE
+  ) |>
+  janitor::clean_names()
+submission <- readr::read_csv(file.path(data_path, "sample_submission.csv"), show_col_types = FALSE)
+```
+```{r}
+
+library(applicable)
+library(isotree)
+
+internal_get_outliers <- function(od_target){
+  remove_cols <- c('id','listening_time_minutes')
+  od_tr <- od_target |> select(-any_of(remove_cols))
+  #od_te <- od_target |>  select(-any_of(remove_cols))
+  if_mod <- apd_isolation(od_tr, ntrees = 100, nthreads = 4)
+  od_score <- score(if_mod, od_tr) |>select('score_pctl')
+  return(od_score)
+}
+
+get_outliers <- memoise::memoise(internal_get_outliers,cache=dk_cach)
+
 ```
 
 ### data nest 
 ```{r}
-tr <- train |> nest()
+n <- 2
+tr <- train |> bind_cols(get_outliers(train))|>
+  nest(.by = podcast_name) |>
+  head(n)
+te <- test |>
+  nest(.by = podcast_name) |>
+  head(n)
 ```
 
 
 
 ```{r}
 
-mm_fit <- train|>head()
-  #filter(podcast_name %in% c("Athlete's Arena", "Brain Boost", "Business Briefs", "Business Insights", "Comedy Corner", "Crime Chronicles"))|>
-  nest(.by=podcast_name)|>
-  mutate(models = lapply(data, function(df) lm(listening_time_minutes ~ number_of_ads +guest_popularity_percentage +host_popularity_percentage+ episode_length_minutes  , data = df)))|>
-  mutate(glance = map(models, broom::glance)) %>% 
-  unnest(glance) 
-```
 
-```{r}
-mm_fit |> ggplot(aes(x=sigma, y= adj.r.squared)) +geom_jitter()
+get_rcp <- function(df) {
+  rcp <-
+    recipe(listening_time_minutes ~
+           episode_length_minutes
+            +host_popularity_percentage
+            #+guest_popularity_percentage
+            +number_of_ads
+           # #+podcast_name 
+           # +episode_title
+           # +genre
+           # +publication_day
+           # +publication_time
+           +episode_sentiment
+           +score_pctl,
+           data = df) |>
+    #update_role(id, new_role='ID')|>
+    #step_sqrt(listening_time_minutes, skip=TRUE)|>
+    step_mutate(
+      
+      listening_time_minutes=rescale(listening_time_minutes,to=c(0,1),from=c(0,120)),
+      listening_time_minutes = (listening_time_minutes*(n-1) + 0.5)/n, # should be larget than 0 and less than 1
+      skip=TRUE)|>
+    #step_log(listening_time_minutes, offset=1, skip=TRUE)|>
+    #step_mutate(score_pctl = get_outliers(.x))|>
+    step_mutate(episode_length_minutes  = ifelse(episode_length_minutes  >= 0 & episode_length_minutes  <= 121,
+                                                episode_length_minutes , 
+                                                NA),
+                number_of_ads  = ifelse(number_of_ads  >= 0 & number_of_ads  <= 5,
+                                                number_of_ads , 
+                                                NA))|>
+   
+    step_impute_median(all_numeric_predictors()) |>
+    step_impute_mode(all_nominal_predictors()) |>
+  #  step_mutate(#episode_id =readr::parse_number(episode_title))|>
+  #  episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')))|>  
+    # Preprocessing steps (customize as needed)
+    # step_naomit(all_predictors()) %>%       # Remove missing values
+   # step_rm(episode_title)|>
+    step_normalize(all_numeric_predictors()) %>% # Standardize numeric predictors
+    step_novel(all_nominal_predictors()) |>
+    step_unknown(all_nominal_predictors()) |>
+    step_other(all_nominal_predictors()) |>
+    step_dummy(all_nominal_predictors()) |> # One-hot encode categorical vars
+    step_zv(all_predictors()) |>
+    step_corr(all_predictors()) |>
+    check_missing(all_predictors())
+  return(rcp)
+}
 
-```
-```{r}
-te <- test |>head()
-  nest(.by=podcast_name)|>
-  select(podcast_name, te_data = data ) 
-combined <- left_join(te,mm_fit, by='podcast_name')
-
-```
-```{r}
-get_predict <- function(mod, data){
+get_beta_mod <- function(df){
+   rmse_metrics <- metric_set(yardstick::rmse) # main goal is roc_auc, accuracy is just for reference
+  set.seed(123)
+  #df <- df|>bind_cols(df|>get_outliers())
+  cv_folds <- vfold_cv(df, v = 3,strata = listening_time_minutes)
+  
+  lm_recipe  <- get_rcp(df)
+  prep_df <- lm_recipe |> prep()|>juice()
+  
+  model <- betareg(
+  listening_time_minutes ~ .,           # Formula (response ~ predictors)
+  data = prep_df ,           # Dataframe
+  link = "logit",        # Default link (others: "probit", "cloglog")
+  link.phi = "log"       # Link for precision parameter (phi)
+  )
+  summary(model)           # Check coefficients & significance
   
 }
-combined |> head() |>
-  mutate(.pred=map2(models, te_data, predict)) -> tmp_pred
+
+get_mod <- function(df,return_type='resample') {
+  
+  rmse_metrics <- metric_set(yardstick::rmse) # main goal is roc_auc, accuracy is just for reference
+
+  
+  # 2. Create 3-Fold Cross-Validation Splits
+  set.seed(123)
+  #df <- df|>bind_cols(df|>get_outliers())
+  cv_folds <- vfold_cv(df, v = 3,strata = listening_time_minutes)
+  
+  lm_recipe  <- get_rcp(df)
+  
+  # 3. Define Linear Regression Model
+  lm_model <- linear_reg() %>% 
+    set_engine("lm")
+ 
+  lgbm_eng<-
+   parsnip::boost_tree(
+      trees = 200, # Number of trees
+      learn_rate = 0.05,
+      tree_depth =9,
+      loss_reduction = 0.1,
+      stop_iter = 50,
+      sample_size = 0.8, # Added sample_size
+      #tree_depth = tune(),
+      #mtry = 0.5,
+      min_n = 50
+   ) |>
+   set_mode("regression")|>
+   set_engine("lightgbm",
+              #metric='rmse', 
+              num_leaves =210 ,
+              #counts = FALSE,
+              num_threads = 12,
+              metric = "rmse",              # 优化目标
+              # reg_alpha=0.01,
+              # reg_lambda = 0.5,
+              #verbose=1
+              ) 
+
+  
+  # 4. Bundle into a Workflow
+  lm_workflow <- workflow() %>% 
+    add_recipe(lm_recipe) %>% 
+    add_model(lgbm_eng)
+  
+  if (return_type == "resample") {
+    result <- lm_workflow |>
+      fit_resamples(cv_folds,
+        control = control_resamples(verbose = FALSE),
+        metrics = rmse_metrics
+      ) |>
+      collect_metrics()
+  } else if (return_type == "fit") {
+    result <- lm_workflow |>
+      fit(df)
+  }
+
+  return(result)
+}
+
+get_predict<- function(wf,newdata,target_type='non'){
+  
+  .pred <- wf|>
+    predict(newdata)
+  
+  if(target_type == 'log1p'){
+    .pred <- .pred|> expm1()
+  } else if( target_type == 'sqrt') {
+    .pred <- .pred^2
+  } else if(target_type =='beta') {
+    .pred <- .pred |> rescale(to=c(0,120), from=c(0,1))
+  }
+
+  return(.pred)
+}
+
+
+
+mm_fit <- tr |>
+  mutate(cv_data = map(data, ~get_mod(.x),.progress = TRUE),
+         model = map(data, ~get_mod(.x,return_type='fit'),.progress = TRUE),)|>
+  unnest(cv_data)
+
+
+mm_fit|>dplyr::select(-data)
+```
+# diagnose
+```{r}
+library(ggfortify)
+library(patchwork)
+#mm_fit |> unnest(data ) |> select(podcast_name, listening_time_minutes) |>nest(.by=podcast_name,.key = 'true')
+mm_fit <- 
+  mm_fit|> 
+  rowwise()|> mutate(true = list(pluck(data, 'listening_time_minutes')))|>
+  mutate(.pred=list(get_predict(model, data, target_type = 'beta'))) |>
+  rowwise()|>mutate(rmse_score = yardstick::rmse_vec(truth=true, estimate=.pred))
+
+tmp_true <- mm_fit |> pluck('true',1)
+tmp_pred <- mm_fit |> pluck('.pred',1)
+tmp_target <- tibble("true"=tmp_true, "pred"=tmp_pred)
+tmp_target |> 
+  pivot_longer(cols=everything())|>
+  ggplot(aes(x=value,color=name))+geom_density()
+
+tmp_mod <- mm_fit$model[[1]] |>extract_fit_engine()
+#tmp_mod |> tidy()
+#tmp_mod|>glance()
+#mm_fit|> rowwise()|>mutate(true = list(select(data, listening_time_minutes))) |> mutate(.pred=list(get_predict(model, data))) 
+#tmp_mod |>autoplot()
+```
+
+
+
+# predict
+```{r}
+mm_fit |> ggplot(aes(x = sigma, y = adj.r.squared)) +
+  geom_jitter()
+
+te <- test |> head()
+nest(.by = podcast_name) |>
+  select(podcast_name, te_data = data)
+combined <- left_join(te, mm_fit, by = "podcast_name")
+
+get_predict <- function(mod, data) {
+
+}
+combined |>
+  head() |>
+  mutate(.pred = map2(models, te_data, predict)) -> tmp_pred
 tmp_pred
 ```
 
