@@ -59,7 +59,7 @@ library(furrr)
 library(textrecipes)
 library(themis)
 library(embed)
-library(tailor)
+#library(tailor)
 
 
 library(bonsai)
@@ -601,6 +601,7 @@ rcp_bs_v2 <-
 #tmp_rcp |> glimpse()
 ```
 
+
 #### 4.3 v3 imputate missing value based on ads
 ```{r}
 rcp_bs_v3 <-
@@ -613,19 +614,38 @@ rcp_bs_v3 <-
   step_normalize(all_numeric_predictors())|> 
   check_missing(all_predictors())
 
-tmp_rcp_v3_df <- rcp_bs_v3 |> prep()|>juice()
+#tmp_rcp_v3_df <- rcp_bs_v3 |> prep()|>juice()
 ```
 
+#### 4.4 v4 imputate missing value based on ads
+```{r}
+rcp_bs_v4 <-
+  rcp_bs|> #step_rm(date,year_offset)|>
+  step_mutate(
+    has_guest=as.integer(is.na(guest_popularity_percentage)),
+    has_length=as.integer(is.na(episode_length_minutes))
+    )|>
+  step_impute_median(all_numeric_predictors())|>
+  #step_log(listening_time_minutes, offset=1,skip=TRUE) |>
+  step_rm(all_nominal())|>
+  step_zv(all_predictors())|>
+  #step_corr(all_numeric_predictors())|>
+  step_normalize(all_numeric_predictors())|> 
+  check_missing(all_predictors())
 
-#### 4.10 all recipes
+ rcp_bs_v4 |> prep()|>juice()->tmp
+```
+#### 4.4 guest_popularity missing handlling
 
 ```{r}
 set.seed(1234)
 library(future)
 library(furrr)
 selected_rcps <- list(bs=rcp_bs_v0,
-                      v1=rcp_bs_v1,
-                      v2=rcp_bs_v2)
+                      #v1=rcp_bs_v1,
+                      #v2=rcp_bs_v2,
+                      #v3=rcp_bs_v3,
+                      v4=rcp_bs_v4)
 plan(multisession,workers = 5)
 #selected_rcps|>map(\(rcp_item) rcp_item|>prep()|>bake(new_data=train_set)|>summary())
 plan(sequential)
@@ -791,11 +811,9 @@ diag_mod_fit <- function(wf){
 ```{r}
 set.seed(1234)
 
-tailor_rng <- tailor() |>
-  adjust_numeric_range()
 simple_wf_fit <- 
   workflow() |>
-  add_recipe(rcp_bs_v1) |>
+  add_recipe(rcp_bs_v4) |>
   add_model(lm_eng)|>
   #add_tailor(tailor_rng)
  # fit(train_set)
@@ -815,7 +833,7 @@ simple_wf_fit <-
 set.seed(1234)
 library(stacks)
 library(future)
-plan(multisession,workers = 12)
+#plan(multisession,workers = 12)
 
 ctrl <- control_resamples(save_pred = TRUE, 
                           save_workflow = FALSE,
@@ -846,7 +864,7 @@ wfs_result|>
   filter(.metric=='rmse')|>
   select(wflow_id, model, .metric,mean, n, std_err
          )
-plan(sequential)
+#plan(sequential)
 ```
 
 ### 7 stacking

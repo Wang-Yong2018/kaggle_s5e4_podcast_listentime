@@ -100,7 +100,10 @@ plt_density <- function(df,col_name='listening_time_minutes'){
     ggplot(aes(x=.data[[col_name]])) + geom_density(alpha=0.5)+ theme_classic()
            
 }
+```
 
+#### get_rcp
+```{r}
 get_rcp <- function(df) {
   rcp <-
     recipe(listening_time_minutes ~.,
@@ -129,7 +132,10 @@ get_rcp <- function(df) {
                                                 NA),
                 number_of_ads  = ifelse(number_of_ads  >= 0 & number_of_ads  <= 5,
                                                 number_of_ads , 
-                                                'NA'))|>
+                                                'NA'),
+                episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')),
+                has_guest=ifelse(is.na(guest_popularity_percentage),0,1),
+                has_length=ifelse(is.na(episode_length_minutes),0,1))|>
    
     step_impute_bag(all_numeric_predictors(),impute_with = imp_vars(number_of_ads,publication_day, publication_time, genre)) |>
     step_impute_mode(all_nominal_predictors()) |>
@@ -148,7 +154,11 @@ get_rcp <- function(df) {
     check_missing(all_predictors())
   return(rcp)
 }
+```
 
+#### get_beta_mod
+
+```{r}
 get_beta_mod <- function(df){
    rmse_metrics <- metric_set(yardstick::rmse) # main goal is roc_auc, accuracy is just for reference
   set.seed(123)
@@ -167,7 +177,10 @@ get_beta_mod <- function(df){
   summary(model)           # Check coefficients & significance
   
 }
+```
 
+#### get_mod
+```{r}
 get_mod <- function(df,return_type='resample') {
   
   rmse_metrics <- metric_set(yardstick::rmse) # main goal is roc_auc, accuracy is just for reference
