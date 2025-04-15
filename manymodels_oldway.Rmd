@@ -19,7 +19,7 @@ library(furrr)
 library(themis)
 #library(embed)
 #library(tailor)
-
+library(furrr)
 
 library(bonsai)
 library(lightgbm)
@@ -120,31 +120,20 @@ get_rcp <- function(df) {
            # +score_pctl,
            data = df) |>
     update_role(id, new_role='ID')|>
-    #step_sqrt(listening_time_minutes, skip=TRUE)|>
-    #step_mutate(
-      #listening_time_minutes=rescale(listening_time_minutes,to=c(0,1),from=c(0,120)),
-      #listening_time_minutes = (listening_time_minutes*(n-1) + 0.5)/n, # should be larget than 0 and less than 1
-      #skip=TRUE)|>
-    #step_log(listening_time_minutes, offset=1, skip=TRUE)|>
-    #step_mutate(score_pctl = get_outliers(.x))|>
     step_mutate(episode_length_minutes  = ifelse(episode_length_minutes  >= 0 & episode_length_minutes  <= 121,
                                                 episode_length_minutes , 
                                                 NA),
-                number_of_ads  = ifelse(number_of_ads  >= 0 & number_of_ads  <= 5,
-                                                number_of_ads , 
-                                                'NA'),
-                episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')),
-                has_guest=ifelse(is.na(guest_popularity_percentage),0,1),
-                has_length=ifelse(is.na(episode_length_minutes),0,1))|>
-   
-    step_impute_bag(all_numeric_predictors(),impute_with = imp_vars(number_of_ads,publication_day, publication_time, genre)) |>
+                number_of_ads  = ifelse(number_of_ads  >= 0 & number_of_ads  <= 5, number_of_ads ,  'NA'),
+                has_guest=as.integer(is.na(guest_popularity_percentage)),
+                has_length=as.integer(is.na(episode_length_minutes)))|>  
+    ##step_impute_bag(all_numeric_predictors(),impute_with = imp_vars(number_of_ads,publication_day, publication_time, genre)) |>
+    step_impute_median(all_numeric_predictors())|>
     step_impute_mode(all_nominal_predictors()) |>
-  #  step_mutate(#episode_id =readr::parse_number(episode_title))|>
-  #  episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')))|>  
+    step_mutate( episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')))|>  
     # Preprocessing steps (customize as needed)
     # step_naomit(all_predictors()) %>%       # Remove missing values
-   # step_rm(episode_title)|>
-    step_normalize(all_numeric_predictors()) %>% # Standardize numeric predictors
+    step_rm(episode_title)|>
+    #step_normalize(all_numeric_predictors()) %>% # Standardize numeric predictors
     step_novel(all_nominal_predictors()) |>
     step_unknown(all_nominal_predictors()) |>
     step_other(all_nominal_predictors()) |>
@@ -157,7 +146,6 @@ get_rcp <- function(df) {
 ```
 
 #### get_beta_mod
-
 ```{r}
 get_beta_mod <- function(df){
    rmse_metrics <- metric_set(yardstick::rmse) # main goal is roc_auc, accuracy is just for reference
@@ -228,12 +216,14 @@ get_mod <- function(df,return_type='resample') {
     add_model(lm_model)
   
   if (return_type == "resample") {
+    plan(multisession, workers = availableCores() - 1) 
     result <- lm_workflow |>
       fit_resamples(cv_folds,
         control = control_resamples(verbose = FALSE),
         metrics = rmse_metrics
       ) |>
       collect_metrics()
+    plan(sequential)
   } else if (return_type == "fit") {
     result <- lm_workflow |>
       fit(df)
@@ -241,7 +231,11 @@ get_mod <- function(df,return_type='resample') {
 
   return(result)
 }
+```
 
+
+#### get_predict
+```{r}
 get_predict<- function(wf,newdata,target_type='non'){
   
   .pred <- wf|>
@@ -261,13 +255,15 @@ get_predict<- function(wf,newdata,target_type='non'){
 
 
 ```{r}
+
+#plan(multisession, workers = availableCores() - 1) 
 mm_fit <- tr |>
   mutate(cv_data = map(data, ~get_mod(.x),.progress = TRUE),
-         model = map(data, ~get_mod(.x,return_type='fit'),.progress = TRUE),)|>
+         model = future_map(data, ~get_mod(.x,return_type='fit'),.progress = TRUE))|>
   unnest(cv_data)
 
-
-mm_fit|>dplyr::select(-data)
+mm_fit|>
+  mutate(glance=map(model, ~broom::glance(.x)))|>unnest(glance)
 ```
 # diagnose
 ```{r}
@@ -347,12 +343,39 @@ nest(.by = podcast_name) |>
   select(podcast_name, te_data = data)
 combined <- left_join(te, mm_fit, by = "podcast_name")
 
-get_predict <- function(mod, data) {
-
-}
 combined |>
   head() |>
   mutate(.pred = map2(models, te_data, predict)) -> tmp_pred
 tmp_pred
+```
+
+
+```{r}
+library(embed) 
+tmp_df <- tr|>dplyr::slice(1)|>unnest(data)|>mutate(episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')))
+
+lm_spec <- linear_reg() %>%
+  set_mode("regression") %>%
+  set_engine("lm")
+
+
+lm_rcp <- 
+  recipe(listening_time_minutes ~ episode_length_minutes+guest_popularity_percentage+episode_id, data = tmp_df)|>
+#  step_mutate( episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')))|>  
+  step_mutate(guest_popularity_percentage=replace_na(guest_popularity_percentage,0 ),
+              has_guest=ifelse(is.na(guest_popularity_percentage),0,1))|>
+  step_impute_linear(episode_length_minutes,impute_with = imp_vars(episode_id))|>
+  step_rm(all_nominal_predictors())|>
+  check_missing(all_predictors())
+
+lm_wf <- workflow() %>%
+  add_model(lm_spec) %>%
+  add_recipe(lm_rcp)
+
+
+lm_fit <- lm_wf %>%
+  fit(tmp_df)
+lm_fit|>glance()
+lm_fit|>tidy()
 ```
 

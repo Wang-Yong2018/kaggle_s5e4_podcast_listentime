@@ -635,7 +635,7 @@ rcp_bs_v4 <-
 
  rcp_bs_v4 |> prep()|>juice()->tmp
 ```
-#### 4.4 guest_popularity missing handlling
+#### 4.10 select recipes
 
 ```{r}
 set.seed(1234)
