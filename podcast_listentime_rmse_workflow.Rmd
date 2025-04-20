@@ -165,8 +165,11 @@ plot_cat_column_eda <- function(df, col_name,n_lump=10){
   p1/p2
 }
 
-plot_column_eda <- function(df, col_name, y_name=target_name){
+plot_column_eda <- function(df, col_name, y_name=target_name,skip=T){
   
+  if(skip){
+    return()
+  } else{
   is_numeric <- is.numeric(df[[col_name]])
   if(is_numeric){
     plt <- plot_num_column_eda(df, col_name, y_name)
@@ -175,6 +178,7 @@ plot_column_eda <- function(df, col_name, y_name=target_name){
     plt <- plot_cat_column_eda(df, col_name, y_name)
   }
   return(plt)
+  }
 }
 
 ```
@@ -405,23 +409,28 @@ col_name <- 'listening_time_minutes'
 plot_column_eda(train, col_name)
 ```
 
+## coding
 ### outlier detect base on train & test
 ```{r fig.height=3, fig.width=5}
 library(applicable)
 library(isotree)
 library(mice)   
-internal_get_mice_df <- function(df,dataset_id=1){
+internal_get_mice_df_all <- function(){
  
-  imp <- mice(df, m = 5, maxit = 5, seed = 123)
-  fit <- with(imp, lm(episode_length_minutes~genre+
+  df <-  train |>bind_rows(test) |> select(-listening_time_minutes)
+  
+  imp <- mice(df, m = 5, maxit = 5, seed = 123,,printFlag=F)
+  fit <- with(imp, lm(episode_length_minutes~
+                        podcast_name+
+                        genre+
                         host_popularity_percentage+
                         guest_popularity_percentage+
                         publication_day+
                         publication_time+
                         number_of_ads+
                         episode_sentiment ))
-  complete_df <- complete(imp, dataset_id) 
-  return(complete_df)
+  complete_data_all <- complete(imp, "long") |>select(.imp,.id,id, episode_length_minutes)
+  return(complete_data_all)
 }
 
 internal_get_outliers <- function(od_target){
@@ -435,8 +444,22 @@ internal_get_outliers <- function(od_target){
 }
 
 get_outliers <- memoise::memoise(internal_get_outliers,cache=dk_cach)
-get_mice_df <- memoise::memoise(internal_get_mice_df,cache=dk_cach)
+get_mice_df_all <- memoise::memoise(internal_get_mice_df_all,cache=dk_cach)
 
+get_mice_at <-function(df, imp_id =1){
+  mice_result <- get_mice_df_all() |>
+    filter(.imp == imp_id)|>
+    select(id,episode_length_minutes)
+  
+  matched_mice_result <- df |>
+    mutate(has_length=as.integer(is.na(episode_length_minutes)),
+           has_guest= as.integer(is.na(guest_popularity_percentage)))|>
+    select(-episode_length_minutes) |>
+    left_join(mice_result, by='id') 
+    
+  return(matched_mice_result)   
+  
+}
 list(tr=train,te=test)|>
   map_dfr(\(data) get_outliers(data),
           .id='source') |>
@@ -448,7 +471,6 @@ ts_od <- train  |> get_outliers() |> bind_cols(train)
 The above plot shoed the train & test data set almost perfrect similiar from outlier distance viewpoint. 
 Thus, we can believe they are same distribution
 
-## coding
 
 ### 1. Data Loading and Initial Exploration ----
 
@@ -464,16 +486,18 @@ Thus, we can believe they are same distribution
 
 ```{r}
 set.seed(1234)
+imp_slice =5 
 #train <- ts_df |> as_tibble() |>filter(source=='train')|>dplyr::select(-source)
 #df_split <- initial_time_split(train, prop = 0.8)
 od_train <- train |>
-  get_mice_df()|>
-  get_outliers()|>dplyr::select(score_pctl)  |>bind_cols(train)
+  get_mice_at(imp_id=imp_slice)|>
+  (\(x) bind_cols(x, get_outliers(x)|>dplyr::select(score_pctl)))()
+  #get_outliers()|>dplyr::select(score_pctl)  |>bind_cols(train)
 od_test <- test|>
-  get_mice_df()|>
-  get_outliers()  |>dplyr::select(score_pctl) |>bind_cols(test)
+  get_mice_at(imp_id=imp_slice)|>
+   (\(x) bind_cols(x, get_outliers(x)|>dplyr::select(score_pctl)))()
 # df_split <- initial_split(od_train, prop = 0.7, strata =listening_time_minutes )
-df_split <- initial_split(od_train, prop = 0.7, strata =podcast_name)
+df_split <- initial_split(od_train, prop = 0.7, strata =listening_time_minutes)
 train_set <- training(df_split)
 test_set <- testing(df_split)
 cv_folds <- vfold_cv(train_set,
@@ -641,14 +665,26 @@ rcp_bs_v3 <-
 rcp_bs_v4 <-
   rcp_bs|> #step_rm(date,year_offset)|>
   step_mutate(
-    has_guest=as.integer(is.na(guest_popularity_percentage)),
-    has_length=as.integer(is.na(episode_length_minutes))
+    #has_guest=as.integer(is.na(guest_popularity_percentage)),
+    #has_length=as.integer(is.na(episode_length_minutes))
     )|>
+  step_mutate(episode_id =as.integer(stringr::str_replace(episode_title,'Episode ','')))|>  
+  step_rm(episode_title)|>
+  step_mutate(episode_length_minutes  = ifelse(episode_length_minutes  >= 0 & episode_length_minutes  <= 121,
+                                                episode_length_minutes , 
+                                                NA),
+                number_of_ads  = ifelse(number_of_ads  >= 0 & number_of_ads  <= 5, number_of_ads ,  'NA'),
+                                guest_popularity_percentage = ifelse(is.na(guest_popularity_percentage),0,guest_popularity_percentage),
+                is_weekend = if_else(publication_day %in% c("Saturday", "Sunday"), 1, 0)
+              
+                
+              )|>
   step_impute_median(all_numeric_predictors())|>
   #step_log(listening_time_minutes, offset=1,skip=TRUE) |>
+  
   step_rm(all_nominal())|>
   step_zv(all_predictors())|>
-  #step_corr(all_numeric_predictors())|>
+  step_corr(all_numeric_predictors())|>
   step_normalize(all_numeric_predictors())|> 
   check_missing(all_predictors())
 
@@ -832,192 +868,192 @@ set.seed(1234)
 
 simple_wf_fit <- 
   workflow() |>
-  add_recipe(rcp_bs_v1) |>
+  add_recipe(rcp_bs_v4) |>
   add_model(lm_eng)|>
   #add_tailor(tailor_rng)
- # fit(train_set)
+  fit(train_set)
   
-#simple_wf_fit |> glance()
-  fit_resamples(cv_folds,
-          control = control_resamples(verbose=TRUE),
-           metrics=rmse_metrics)
-  simple_wf_fit |> collect_metrics()
+simple_wf_fit |> glance()
+  #fit_resamples(cv_folds,
+  #        control = control_resamples(verbose=TRUE),
+  #         metrics=rmse_metrics)
+  #simple_wf_fit |> collect_metrics()
   
-#diag_mod_fit(simple_wf_fit)
+diag_mod_fit(simple_wf_fit)
 ```
 
 #### simple workflowset
 
 ```{r}
-set.seed(1234)
-library(stacks)
-library(future)
-#plan(multisession,workers = 12)
-
-ctrl <- control_resamples(save_pred = TRUE, 
-                          save_workflow = FALSE,
-                          verbose=TRUE,
-                          pkgs = c("recipes", 
-                                   "parsnip",
-                                   "yardstick",
-                                   'lightgbm',
-                                   'stringr',
-                                   'forcats')  # Critical for parallel # 
-                          )
-
-wfs_result <-
-  workflow_set(preproc = selected_rcps,
-               models = selected_eng,
-               cross=TRUE) |>
-  option_add(
-    control = control_stack_resamples(),
-    metrics = rmse_metrics  ) |>
-  workflow_map(fn='fit_resamples',
-               #resamples = vfold_cv(od_train, v = 10,strata = rainfall) ,
-               resamples =cv_folds,
-               #metrics =rmse_metrics,
-               #control = ctrl
-               )
-wfs_result|> 
-  collect_metrics()  |>
-  filter(.metric=='rmse')|>
-  select(wflow_id, model, .metric,mean, n, std_err
-         )
+# set.seed(1234)
+# library(stacks)
+# library(future)
+# #plan(multisession,workers = 12)
+# 
+# ctrl <- control_resamples(save_pred = TRUE, 
+#                           save_workflow = FALSE,
+#                           verbose=TRUE,
+#                           pkgs = c("recipes", 
+#                                    "parsnip",
+#                                    "yardstick",
+#                                    'lightgbm',
+#                                    'stringr',
+#                                    'forcats')  # Critical for parallel # 
+#                           )
+# 
+# wfs_result <-
+#   workflow_set(preproc = selected_rcps,
+#                models = selected_eng,
+#                cross=TRUE) |>
+#   option_add(
+#     control = control_stack_resamples(),
+#     metrics = rmse_metrics  ) |>
+#   workflow_map(fn='fit_resamples',
+#                #resamples = vfold_cv(od_train, v = 10,strata = rainfall) ,
+#                resamples =cv_folds,
+#                #metrics =rmse_metrics,
+#                #control = ctrl
+#                )
+# wfs_result|> 
+#   collect_metrics()  |>
+#   filter(.metric=='rmse')|>
+#   select(wflow_id, model, .metric,mean, n, std_err
+#          )
 #plan(sequential)
 ```
 
 ### 7 stacking
 
 ```{r}
-set.seed(1234)
-library(future)
-
-plan(multisession,workers = 12)
-
-combined_fit <-
-  stacks::stacks()|>
-  stacks::add_candidates(wfs_result)|>
-  stacks::blend_predictions(
-    penalty = 10^seq(-2, 0.5, length = 20),  # Regularization
-    lower_bound = 0,   # Force non-negative coefficients
-    upper_bound = 120)     # Cap contributions at 100%)|>
-  stacks::fit_members()
-
-combined_fit|>
-  autoplot(type = "weights")
-
-autoplot(combined_fit)
-#plan(sequential)
+# set.seed(1234)
+# library(future)
+# 
+# plan(multisession,workers = 12)
+# 
+# combined_fit <-
+#   stacks::stacks()|>
+#   stacks::add_candidates(wfs_result)|>
+#   stacks::blend_predictions(
+#     penalty = 10^seq(-2, 0.5, length = 20),  # Regularization
+#     lower_bound = 0,   # Force non-negative coefficients
+#     upper_bound = 120)     # Cap contributions at 100%)|>
+#   stacks::fit_members()
+# 
+# combined_fit|>
+#   autoplot(type = "weights")
+# 
+# autoplot(combined_fit)
+# #plan(sequential)
 ```
 
 ### 7. Tuning Grid ----
 #### define tune helper
 ```{r}
-get_tuned<- function(rcp, mod,tune_grid,is_plot=FALSE, eng_name='glmnet'){
-  library(future)
-  total_cores= 4
-  # 定义调优控制选项
-ctrl <- control_grid(
-  verbose = TRUE,         # 显示详细信息
-  allow_par = TRUE,       # 允许并行计算
-  save_pred = TRUE,       # 保存预测结果
-  save_workflow = TRUE,   # 保存工作流
-  #parallel_over = "resamples"  # 并行计算方式
-)
-  plan(multisession,workers = total_cores - 4)
-  tune_wf_fit <- 
-    workflow() |>
-    add_recipe(rcp) |>
-    add_model(mod)|>
-    tune_grid(resamples = cv_folds,
-              grid = tune_grid,
-              control = ctrl,
-              metrics =rocauc_metrics )
-  
-  
-  plan(sequential) 
-  
-  best_params <- select_best(tune_wf_fit, metric = "roc_auc")
-  print(best_params)
-  tuned_parameter <- tune_wf_fit |> collect_metrics() 
-  
-  if(is_plot){
-    plt <- switch(eng_name,
-                  'glmnet' = ggplot(data = tuned_parameter, aes(x = penalty, y = mean, color = as.factor(mixture))),
-                  'svm' = ggplot(data = tuned_parameter, aes(x = cost, y = mean, color = as.factor(rbf_sigma)))
-                 ) 
-    plt + 
-      geom_line() +
-      geom_point() +
-      #scale_x_log10() +  # 对 penalty 取对数
-      labs(title = "parameter to  vs ROC AUC",
-           x = "parameter 1 ",
-           y = "ROC AUC",
-           color = "parameter 2") +
-      theme_minimal()
-    plt 
-  }
-  return(tuned_parameter)
-}
+# get_tuned<- function(rcp, mod,tune_grid,is_plot=FALSE, eng_name='glmnet'){
+#   library(future)
+#   total_cores= 4
+#   # 定义调优控制选项
+# ctrl <- control_grid(
+#   verbose = TRUE,         # 显示详细信息
+#   allow_par = TRUE,       # 允许并行计算
+#   save_pred = TRUE,       # 保存预测结果
+#   save_workflow = TRUE,   # 保存工作流
+#   #parallel_over = "resamples"  # 并行计算方式
+# )
+#   plan(multisession,workers = total_cores - 4)
+#   tune_wf_fit <- 
+#     workflow() |>
+#     add_recipe(rcp) |>
+#     add_model(mod)|>
+#     tune_grid(resamples = cv_folds,
+#               grid = tune_grid,
+#               control = ctrl,
+#               metrics =rocauc_metrics )
+#   
+#   
+#   plan(sequential) 
+#   
+#   best_params <- select_best(tune_wf_fit, metric = "roc_auc")
+#   print(best_params)
+#   tuned_parameter <- tune_wf_fit |> collect_metrics() 
+#   
+#   if(is_plot){
+#     plt <- switch(eng_name,
+#                   'glmnet' = ggplot(data = tuned_parameter, aes(x = penalty, y = mean, color = as.factor(mixture))),
+#                   'svm' = ggplot(data = tuned_parameter, aes(x = cost, y = mean, color = as.factor(rbf_sigma)))
+#                  ) 
+#     plt + 
+#       geom_line() +
+#       geom_point() +
+#       #scale_x_log10() +  # 对 penalty 取对数
+#       labs(title = "parameter to  vs ROC AUC",
+#            x = "parameter 1 ",
+#            y = "ROC AUC",
+#            color = "parameter 2") +
+#       theme_minimal()
+#     plt 
+#   }
+#   return(tuned_parameter)
+# }
 ```
 
 #### tune glmnet
 ```{r}
-set.seed(1234)
-glmnet_spec <- logistic_reg(penalty = tune(), mixture = tune()) %>%  # 调优 penalty 和 mixture
-  set_engine("glmnet") %>%
-  set_mode("regression")
-
-glmnet_grid <- grid_regular(
-  penalty(range = c(-5, -1)),  # log10(penalty) 的范围
-  mixture(range = c(0, 1)),    # mixture 的范围（0: Ridge, 1: Lasso）
-  levels = 10                   # 每个参数的网格点数
-)
-get_tuned(rcp_v13,glmnet_spec, glmnet_grid,is_plot=TRUE,eng_name='glmnet')
-```
-
-#### tune svm
-```{r}
-set.seed(1234)
-svm_spec <- svm_rbf(cost = tune(), rbf_sigma = tune()) %>%  # 调优 cost 和 rbf_sigma
-  set_engine("kernlab") %>%
-  set_mode("regression")
-svm_grid <- grid_regular(
-  cost(range = c(0, 1)),        # cost 的范围（log10 尺度）
-  rbf_sigma(range = c(-5, -1)),   # rbf_sigma 的范围（log10 尺度）
-  levels = 10                     # 每个参数的网格点数
-)
-get_tuned(rcp_v13,svm_spec, svm_grid,is_plot=TRUE, eng_name='svm')
-```
-
-#### tune lgbm
-```{r}
-# 定义 LightGBM 模型
-lgbm_spec <- boost_tree(
-  mode = "regression",  # 分类任务
-  engine = "lightgbm",
-  mtry = tune(),            # 随机选择的特征数量
-  trees = tune(),           # 树的数量
-  min_n = tune(),           # 叶子节点的最小样本数
-  tree_depth = tune(),      # 树的最大深度
-  learn_rate = tune(),      # 学习率
-  loss_reduction = tune(),# 损失减少阈值
-)  |>  set_mode("regression")|>
-   set_engine("lightgbm",
-              metric = "auc",              # 优化目标
-              verbose=1) 
-
-# 定义调参网格
-lgbm_grid <- grid_regular(
-  mtry(range = c(8, 13)),           # 特征数量范围
-  trees(range = c(300, 800)),        # 树的数量范围
-  min_n(range = c(10, 50)),          # 叶子节点的最小样本数范围
-  tree_depth(range = c(5, 10)),     # 树的最大深度范围
-  learn_rate(range = c(0.001, 0.1)), # 学习率范围
-  loss_reduction(range = c(0, 0.001)),# 损失减少阈值范围
-  levels = 10                        # 每个参数的网格点数
-)
-get_tuned(rcp_v13,lgbm_spec, lgbm_grid)
+# set.seed(1234)
+# glmnet_spec <- logistic_reg(penalty = tune(), mixture = tune()) %>%  # 调优 penalty 和 mixture
+#   set_engine("glmnet") %>%
+#   set_mode("regression")
+# 
+# glmnet_grid <- grid_regular(
+#   penalty(range = c(-5, -1)),  # log10(penalty) 的范围
+#   mixture(range = c(0, 1)),    # mixture 的范围（0: Ridge, 1: Lasso）
+#   levels = 10                   # 每个参数的网格点数
+# )
+# get_tuned(rcp_v13,glmnet_spec, glmnet_grid,is_plot=TRUE,eng_name='glmnet')
+# ```
+# 
+# #### tune svm
+# ```{r}
+# set.seed(1234)
+# svm_spec <- svm_rbf(cost = tune(), rbf_sigma = tune()) %>%  # 调优 cost 和 rbf_sigma
+#   set_engine("kernlab") %>%
+#   set_mode("regression")
+# svm_grid <- grid_regular(
+#   cost(range = c(0, 1)),        # cost 的范围（log10 尺度）
+#   rbf_sigma(range = c(-5, -1)),   # rbf_sigma 的范围（log10 尺度）
+#   levels = 10                     # 每个参数的网格点数
+# )
+# get_tuned(rcp_v13,svm_spec, svm_grid,is_plot=TRUE, eng_name='svm')
+# ```
+# 
+# #### tune lgbm
+# ```{r}
+# # 定义 LightGBM 模型
+# lgbm_spec <- boost_tree(
+#   mode = "regression",  # 分类任务
+#   engine = "lightgbm",
+#   mtry = tune(),            # 随机选择的特征数量
+#   trees = tune(),           # 树的数量
+#   min_n = tune(),           # 叶子节点的最小样本数
+#   tree_depth = tune(),      # 树的最大深度
+#   learn_rate = tune(),      # 学习率
+#   loss_reduction = tune(),# 损失减少阈值
+# )  |>  set_mode("regression")|>
+#    set_engine("lightgbm",
+#               metric = "auc",              # 优化目标
+#               verbose=1) 
+# 
+# # 定义调参网格
+# lgbm_grid <- grid_regular(
+#   mtry(range = c(8, 13)),           # 特征数量范围
+#   trees(range = c(300, 800)),        # 树的数量范围
+#   min_n(range = c(10, 50)),          # 叶子节点的最小样本数范围
+#   tree_depth(range = c(5, 10)),     # 树的最大深度范围
+#   learn_rate(range = c(0.001, 0.1)), # 学习率范围
+#   loss_reduction(range = c(0, 0.001)),# 损失减少阈值范围
+#   levels = 10                        # 每个参数的网格点数
+# )
+# get_tuned(rcp_v13,lgbm_spec, lgbm_grid)
 # tune_lgbm_workflow <- 
 #   workflow_set(preproc = selected_rcps,
 #                models = list(lgb=tune_lgbm_spec) ) 
@@ -1154,9 +1190,9 @@ get_tuned(rcp_v13,lgbm_spec, lgbm_grid)
 ```{r}
 combined_test_result <- 
   test_set %>%
-  bind_cols(predict(combined_fit, 
-                    new_data=test_set,type='prob'))
-combined_test_result|>rocauc_metrics(rainfall, .pred_1,event_level = 'second')
+  bind_cols(predict(simple_wf_fit, 
+                    new_data=test_set))
+combined_test_result|>rmse_metrics(listening_time_minutes, .pred)
 ```
 
 ### 11. Prepare Submission ----
@@ -1165,23 +1201,23 @@ combined_test_result|>rocauc_metrics(rainfall, .pred_1,event_level = 'second')
 set.seed(1234)
 library(future)
 plan(multisession,workers = 12)
-final_model <- combined_fit#simple_wf_fit|>extract_workflow()
-#final_model <- simple_wf_fit|>extract_workflow()
+#final_model <- combined_fit#simple_wf_fit|>extract_workflow()
+final_model <- simple_wf_fit#|>extract_workflow()
 final_predictions <- final_model |>
-   predict(new_data = od_test,
-           type='prob') 
+   predict(new_data = od_test) #|>
+   #mutate(.pred=case_when(.pred<0~abs(.pred),
+    #                      .default=.pred))
 plan(sequential)
 
  # #Handle negative predictions
- # final_predictions <- final_predictions |>
- #   mutate(.pred= ifelse(.pred< 0, 0, .pred))
+  final_predictions <- final_predictions |>
+    mutate(.pred= ifelse(.pred< 0, 0, abs(.pred)))
 
  # Save submission file
  submission |>
-   mutate(Listening_Time_minutes =case_when(Listening_Time_minutes>0~Listening_Time_minutes,
-                                            TRUE ~0)) |>
-   #mutate(rainfall=final_predictions$.pred_1)|>
-   
+   bind_cols(final_predictions)|>
+   mutate(Listening_Time_minutes =.pred) |>
+   select(-.pred)|>
    readr::write_csv("submission.csv")
  zip('submission.csv.zip','submission.csv')
  
@@ -1194,7 +1230,7 @@ plan(sequential)
 ### score submit
 ```{r}
 # submit latest submission.csv
-system('kaggle competitions submit -c playground-series-s5e4 -f submission.csv.zip -m "local cv3 score 13.45497 + post remove value <0 to 0"')
+system('kaggle competitions submit -c playground-series-s5e4 -f submission.csv.zip -m "local 10.76  + post remove value <0 to abs value. main local improve was driven by mice package"')
 
 Sys.sleep(15)
 # get latest score 
