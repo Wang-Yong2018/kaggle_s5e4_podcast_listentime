@@ -10,6 +10,9 @@ output: html_document
 
 ```{r}
 library(tidyverse)
+library(corrr)
+library(rstatix)
+
 library(tidymodels)
 library(finetune)
 library(future)
@@ -23,7 +26,7 @@ library(furrr)
 
 library(bonsai)
 library(lightgbm)
-library(xgboost)
+#library(xgboost)
 library(ranger)
 #library(betareg)
 library(readr)
@@ -82,13 +85,18 @@ get_outliers <- memoise::memoise(internal_get_outliers,cache=dk_cach)
 
 ### data nest 
 ```{r}
-n <- 2
-tr <- train |> bind_cols(get_outliers(train))|>
-  nest(.by = podcast_name) |>
-  head(n)
+full_tr <- train |>
+  mutate(episode_id = parse_number(episode_title))|>
+  #select(-episode_title)|>
+  (\(x) bind_cols(x,get_outliers(od_target = x)))()|>
+  nest(.by = podcast_name) 
+tr <- full_tr
+
 te <- test |>
-  nest(.by = podcast_name) |>
-  head(n)
+  mutate(episode_id = parse_number(episode_title))|>
+  select(-episode_title)|>
+  nest(.by = podcast_name)
+  
 ```
 
 
@@ -120,19 +128,37 @@ get_rcp <- function(df) {
            # +score_pctl,
            data = df) |>
     update_role(id, new_role='ID')|>
+    step_mutate(episode_id =as.integer(stringr::str_replace(episode_title,'Episode ','')))|>  
+    step_rm(episode_title)|>
     step_mutate(episode_length_minutes  = ifelse(episode_length_minutes  >= 0 & episode_length_minutes  <= 121,
                                                 episode_length_minutes , 
                                                 NA),
                 number_of_ads  = ifelse(number_of_ads  >= 0 & number_of_ads  <= 5, number_of_ads ,  'NA'),
                 has_guest=as.integer(is.na(guest_popularity_percentage)),
-                has_length=as.integer(is.na(episode_length_minutes)))|>  
+                guest_popularity_percentage = ifelse(is.na(guest_popularity_percentage),0,guest_popularity_percentage),
+                is_weekend = if_else(publication_day %in% c("Saturday", "Sunday"), 1, 0),
+                has_length=as.integer(is.na(episode_length_minutes)))|>
+ #step_impute_linear(all_numeric_predictors(),impute_with =vars(guest_popularity_percentage,number_of_ads,has_guest,episode_id,host_popularity_percentage,score_pctl,is_weekend))|>
+    # step_impute_bag(episode_length_minutes,                # 目标变量
+    #                 impute_with = imp_vars(all_predictors()),  # 使用所有其他变量
+    #                 trees = 50     # 设置邻居数（根据数据量调整）
+    #                 ) |>
+    #step_naomit(episode_length_minutes, skip = TRUE)|>
+    step_impute_mode(all_nominal_predictors())|>
+    step_mutate(
+                ads_per_minute = number_of_ads / (episode_length_minutes + 1),
+                #number_of_ads = as.integer(number_of_ads),
+               epi_guest = guest_popularity_percentage /(episode_length_minutes + 1),
+               epi_host = host_popularity_percentage /(episode_length_minutes + 1),
+               ads_per_guest = number_of_ads / (guest_popularity_percentage + 1),
+               ads_per_host = number_of_ads / (host_popularity_percentage + 1),
+               score_pctl = score_pctl/(episode_length_minutes))|>
+           
     ##step_impute_bag(all_numeric_predictors(),impute_with = imp_vars(number_of_ads,publication_day, publication_time, genre)) |>
-    step_impute_median(all_numeric_predictors())|>
-    step_impute_mode(all_nominal_predictors()) |>
-    step_mutate( episode_id =as.integer(stringr::str_replace( episode_title, 'Episode ','')))|>  
+  
     # Preprocessing steps (customize as needed)
     # step_naomit(all_predictors()) %>%       # Remove missing values
-    step_rm(episode_title)|>
+    
     #step_normalize(all_numeric_predictors()) %>% # Standardize numeric predictors
     step_novel(all_nominal_predictors()) |>
     step_unknown(all_nominal_predictors()) |>
@@ -166,10 +192,26 @@ get_beta_mod <- function(df){
   
 }
 ```
+#### fillna_with_mice
+```{r}
+get_mice_df <- function(df,dataset_id=1){
+  library(mice)    
+  imp <- mice(df, m = 5, maxit = 5, seed = 123,printFlag=F)
+  fit <- with(imp, lm(episode_length_minutes~genre+
+                        host_popularity_percentage+
+                        guest_popularity_percentage+
+                        publication_day+
+                        publication_time+
+                        number_of_ads+
+                        episode_sentiment ))
+  complete_df <- complete(imp, dataset_id) 
+  return(complete_df)
+}
+```
 
 #### get_mod
 ```{r}
-get_mod <- function(df,return_type='resample') {
+get_mod <- safely(function(df,return_type='resample') {
   
   rmse_metrics <- metric_set(yardstick::rmse) # main goal is roc_auc, accuracy is just for reference
 
@@ -177,19 +219,20 @@ get_mod <- function(df,return_type='resample') {
   # 2. Create 3-Fold Cross-Validation Splits
   set.seed(123)
   #df <- df|>bind_cols(df|>get_outliers())
+  df <- df|> get_mice_df()
   cv_folds <- vfold_cv(df, v = 3,strata = listening_time_minutes)
   
   lm_recipe  <- get_rcp(df)
   
-  # 3. Define Linear Regression Model
-  lm_model <- linear_reg() %>% 
+  # 3. Define Linear Regression Model 
+  lm_eng <- linear_reg() %>% 
     set_engine("lm")
  
   lgbm_eng<-
    parsnip::boost_tree(
-      trees = 200, # Number of trees
+      trees =500, # Number of trees
       learn_rate = 0.05,
-      tree_depth =9,
+      tree_depth =12,
       loss_reduction = 0.1,
       stop_iter = 50,
       sample_size = 0.8, # Added sample_size
@@ -200,7 +243,7 @@ get_mod <- function(df,return_type='resample') {
    set_mode("regression")|>
    set_engine("lightgbm",
               #metric='rmse', 
-              num_leaves =210 ,
+              num_leaves =1024 ,
               #counts = FALSE,
               num_threads = 12,
               metric = "rmse",              # 优化目标
@@ -213,30 +256,32 @@ get_mod <- function(df,return_type='resample') {
   # 4. Bundle into a Workflow
   lm_workflow <- workflow() %>% 
     add_recipe(lm_recipe) %>% 
-    add_model(lm_model)
+    add_model(lm_eng)
   
   if (return_type == "resample") {
-    plan(multisession, workers = availableCores() - 1) 
+    #plan(multisession, workers = availableCores() - 1) 
     result <- lm_workflow |>
       fit_resamples(cv_folds,
         control = control_resamples(verbose = FALSE),
         metrics = rmse_metrics
       ) |>
       collect_metrics()
-    plan(sequential)
+    #plan(sequential)
   } else if (return_type == "fit") {
     result <- lm_workflow |>
       fit(df)
   }
 
   return(result)
-}
+})
 ```
 
 
 #### get_predict
 ```{r}
 get_predict<- function(wf,newdata,target_type='non'){
+  
+  new_data <- newdata |> get_mice_df()
   
   .pred <- wf|>
     predict(newdata)
@@ -256,26 +301,35 @@ get_predict<- function(wf,newdata,target_type='non'){
 
 ```{r}
 
-#plan(multisession, workers = availableCores() - 1) 
-mm_fit <- tr |>
-  mutate(cv_data = map(data, ~get_mod(.x),.progress = TRUE),
-         model = future_map(data, ~get_mod(.x,return_type='fit'),.progress = TRUE))|>
-  unnest(cv_data)
+plan(multisession, workers = availableCores() - 1) 
 
+mm_fit <- tr |>
+  mutate(#cv_data = map(data, ~get_mod(.x),.progress = TRUE),
+         model = map(data, ~get_mod(.x,return_type='fit'),.progress = TRUE,))
+  #unnest(cv_data)
+plan(sequential)
 mm_fit|>
-  mutate(glance=map(model, ~broom::glance(.x)))|>unnest(glance)
+  mutate(  result = map(model, "result"),
+    error = map(model, "error"))|>
+  mutate(glance=map(result, ~broom::glance(.x)))|>unnest(glance)
+mm_fit |>saveRDS('many_model.Rds'                 )
 ```
+
 # diagnose
 ```{r}
 library(ggfortify)
 library(patchwork)
 #mm_fit |> unnest(data ) |> select(podcast_name, listening_time_minutes) |>nest(.by=podcast_name,.key = 'true')
-mm_fit <- 
-  mm_fit|> 
-  rowwise()|> mutate(true = list(pluck(data, 'listening_time_minutes')))|>
-  mutate(.pred=list(get_predict(model, data, target_type = 'none'))) |>
-  rowwise()|>mutate(rmse_score = yardstick::rmse_vec(truth=true, estimate=.pred$.pred
-                                                     ))
+mm_result <-   mm_fit|> 
+  mutate(.pred = map2(.x=model,.y=data, .f=~get_predict(wf=.x, newdata = .y,target_type='none')|>pluck('.pred')))|>
+  mutate(true = map(.x=data, .f=~pluck(.x, 'listening_time_minutes')))
+#  rowwise()|> mutate(true = list(pluck(data, 'listening_time_minutes')))|>
+#  mutate(.pred=list(get_predict(model, data, target_type = 'none'))) |>
+#  rowwise()|>mutate(rmse_score = yardstick::rmse_vec(truth=true, estimate=.pred$.pred))
+
+# tmp_mm_fit <-mm_fit|>
+#   mutate(.pred = map2(.x=model,.y=data, .f=~get_predict(wf=.x, newdata = .y,target_type='none')|>pluck('.pred')))|>
+#   mutate(true = map(.x=data, .f=~pluck(.x, 'listening_time_minutes')))
 
 tmp_true <- mm_fit |> pluck('true',1)
 tmp_pred <- mm_fit |> pluck('.pred',1,1)
@@ -378,4 +432,102 @@ lm_fit <- lm_wf %>%
 lm_fit|>glance()
 lm_fit|>tidy()
 ```
+
+
+
+## focus on Mystery Matters case
+```{r}
+
+tmp_input <- full_tr |>
+  dplyr::slice(1)|>
+  unnest(data) |>
+  get_mice_df()
+  #filter(episode_id ==80)
+
+
+tmp_mod <- tmp_input |> get_mod(return_type = 'fit')
+tmp_mod|>glance()
+tmp_output <- tmp_mod |> augment(tmp_input) 
+tmp_output|>head()
+```
+#### missing episode_length lead to high residual
+##### lm diagnose
+```{r}
+
+c(1:5)|>
+  map(\(x) tmp_mod |> extract_fit_engine()|> plot(x=_, x))
+
+```
+```{r}
+
+```
+
+##### residual plot with if missing.
+as the lm diagnose plot has strong points in the middel. plot is with color if missing episode_length_minutes.
+
+```{r}
+tmp_output|>
+  mutate(has_length=!is.na(episode_length_minutes))|>
+  t_test(.resid~episode_length_minutes, na)
+```
+
+```{r}
+tmp_output |>
+  mutate(missing_data=is.na(episode_length_minutes))|>
+  ggplot(aes(x=.pred, y =.resid,color=missing_data)) +
+  geom_jitter(alpha=0.9) + 
+  labs(title='residual deviation vs missing pod length(minutes0')+
+  theme_classic()
+```
+
+finding :
+1. missing data of episode length lead to high residual deviation. need find better solution
+2. with the episode id gain, the residual deviation gain. need find better solution .
+
+##### qq plot
+```{r}
+tmp_output|>
+ggplot(aes(sample = .resid)) +
+  geom_qq() +
+  geom_qq_line(color = "red") +
+  labs(title = "Normal Q-Q Plot", x = "Theoretical Quantiles", y = "Standardized Residuals")
+```
+
+#####  scaled plot
+```{r}
+tmp_output|>
+  ggplot(aes(.pred, sqrt(abs(.resid)))) +
+  geom_point() +
+  geom_smooth(se = FALSE, method = "loess", color = "red") +
+  labs(title = "Scale-Location Plot", x = "Fitted Values", y = "sqrt(|Standardized Residuals|)")
+
+```
+
+##### residual vs leverage 
+```{r}
+tmp_output|>
+ggplot(aes(listening_time_minutes, .resid)) +
+  geom_point(aes(size = .cooksd), alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Residuals vs Leverage", x = "Leverage", y = "Standardized Residuals") +
+  scale_size_continuous("Cook's Distance", range = c(1, 5))
+```
+##### lag & lead
+##### original
+```{r}
+df_1<- tmp_input|>lm(episode_length_minutes~ genre+ host_popularity_percentage + publication_day+publication_time+ guest_popularity_percentage +number_of_ads+episode_sentiment+listening_time_minutes+episode_id,data=_) |>glance()|>arrange(p.value)
+
+df_2 <- tmp_input|>lm(episode_length_minutes~ genre+ host_popularity_percentage + publication_day+publication_time+ guest_popularity_percentage +number_of_ads+episode_sentiment+episode_id,data=_) |>glance()|>arrange(p.value)
+bind_rows(wi_listening_time = df_1, wo_listening_time=df_2,.id = 'source')
+```
+
+```{r}
+tmp_input |>mutate(lag_length=lag(episode_length_minutes,order_by = episode_id),
+                   lead_length=lead(episode_length_minutes,order_by=episode_id))|>
+  arrange(episode_id)|>
+  select(episode_id,episode_length_minutes, lag_length, lead_length)
+```
+
+
 

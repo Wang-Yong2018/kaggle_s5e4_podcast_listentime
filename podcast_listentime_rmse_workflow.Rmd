@@ -409,6 +409,20 @@ plot_column_eda(train, col_name)
 ```{r fig.height=3, fig.width=5}
 library(applicable)
 library(isotree)
+library(mice)   
+internal_get_mice_df <- function(df,dataset_id=1){
+ 
+  imp <- mice(df, m = 5, maxit = 5, seed = 123)
+  fit <- with(imp, lm(episode_length_minutes~genre+
+                        host_popularity_percentage+
+                        guest_popularity_percentage+
+                        publication_day+
+                        publication_time+
+                        number_of_ads+
+                        episode_sentiment ))
+  complete_df <- complete(imp, dataset_id) 
+  return(complete_df)
+}
 
 internal_get_outliers <- function(od_target){
   remove_cols <- c('id','listening_time_minutes')
@@ -421,6 +435,7 @@ internal_get_outliers <- function(od_target){
 }
 
 get_outliers <- memoise::memoise(internal_get_outliers,cache=dk_cach)
+get_mice_df <- memoise::memoise(internal_get_mice_df,cache=dk_cach)
 
 list(tr=train,te=test)|>
   map_dfr(\(data) get_outliers(data),
@@ -451,8 +466,12 @@ Thus, we can believe they are same distribution
 set.seed(1234)
 #train <- ts_df |> as_tibble() |>filter(source=='train')|>dplyr::select(-source)
 #df_split <- initial_time_split(train, prop = 0.8)
-od_train <- train |>get_outliers()|>dplyr::select(score_pctl)  |>bind_cols(train)
-od_test <- test|>get_outliers()  |>dplyr::select(score_pctl) |>bind_cols(test)
+od_train <- train |>
+  get_mice_df()|>
+  get_outliers()|>dplyr::select(score_pctl)  |>bind_cols(train)
+od_test <- test|>
+  get_mice_df()|>
+  get_outliers()  |>dplyr::select(score_pctl) |>bind_cols(test)
 # df_split <- initial_split(od_train, prop = 0.7, strata =listening_time_minutes )
 df_split <- initial_split(od_train, prop = 0.7, strata =podcast_name)
 train_set <- training(df_split)
@@ -642,9 +661,9 @@ set.seed(1234)
 library(future)
 library(furrr)
 selected_rcps <- list(bs=rcp_bs_v0,
-                      #v1=rcp_bs_v1,
+                      v1=rcp_bs_v1,
                       #v2=rcp_bs_v2,
-                      #v3=rcp_bs_v3,
+                      v3=rcp_bs_v3,
                       v4=rcp_bs_v4)
 plan(multisession,workers = 5)
 #selected_rcps|>map(\(rcp_item) rcp_item|>prep()|>bake(new_data=train_set)|>summary())
@@ -813,7 +832,7 @@ set.seed(1234)
 
 simple_wf_fit <- 
   workflow() |>
-  add_recipe(rcp_bs_v4) |>
+  add_recipe(rcp_bs_v1) |>
   add_model(lm_eng)|>
   #add_tailor(tailor_rng)
  # fit(train_set)
