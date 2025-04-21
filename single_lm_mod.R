@@ -25,19 +25,16 @@ library(lubridate)
 library(memoise)
 dk_cach <- memoise::cache_filesystem('./cache')
 ### download to local
-```{r}
 competition_name <- 'playground-series-s5e4'
 data_path <- file.path('../input',competition_name)
 target_name <- 'listening_time_minutes'
 # system(paste0('kaggle competitions  download -c ', competition_name))
 # unzip(paste0(competition_name,'.zip'),exdir=file.path('../input',competition_name))
 # file.remove(paste0(competition_name,'.zip'))
-```
 
 
 ### loading data
 
-```{r}
 train <-
   readr::read_csv(file.path(data_path, "train.csv"),
                   show_col_types = FALSE
@@ -49,10 +46,6 @@ test <-
   ) |>
   janitor::clean_names()
 submission <- readr::read_csv(file.path(data_path, "sample_submission.csv"), show_col_types = FALSE)
-```
-
-### get_outlier
-```{r}
 
 
 
@@ -109,11 +102,11 @@ tmp_df_mice<- tmp_df_raw|>get_mice_df(dataset_id = 4)
 
 get_glance_lm <- function(df,isplot=F){
   library(ggfortify)
-  mod <- lm(listening_time_minutes~., df)
-  mod|>glance()|>print()
+  mod <- lme4::lmer(listening_time_minutes~episode_length_minutes+(1+episode_id), df)
+  mod|>summary()|>print()
 
   if(isplot==T){
     autoplot(mod)
   }
 }
-c(1:4)|> map_dfr(\(x) get_mice_df(tmp_df_raw, x) |>get_glance_lm())
+get_mice_df(tmp_df_raw, 1) |>get_glance_lm()
