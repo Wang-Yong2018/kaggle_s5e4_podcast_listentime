@@ -90,7 +90,7 @@ full_tr <- train |>
   #select(-episode_title)|>
   (\(x) bind_cols(x,get_outliers(od_target = x)))()|>
   nest(.by = podcast_name) 
-tr <- full_tr
+tr <- full_tr|>head(2)
 
 te <- test |>
   mutate(episode_id = parse_number(episode_title))|>
@@ -107,6 +107,98 @@ plt_density <- function(df,col_name='listening_time_minutes'){
   df|>
     ggplot(aes(x=.data[[col_name]])) + geom_density(alpha=0.5)+ theme_classic()
            
+}
+```
+#### step_mice
+```{r}
+library(mice)
+library(recipes)
+library(dplyr)
+
+
+impute_with_mice <- function(data, formula, m = 5, ...) {
+  imp <- mice(data = data, formula = formula, m = m, ...)
+  mice::complete(imp, action = "long") %>%
+    as_tibble() %>%
+    select(-.imp, -.id) %>%
+    pivot_wider(names_from = .var, values_from = .val)
+}
+step_mice_imputation <-
+  function(recipe, ...,
+           formula = . ~ ., m = 5, role = NA, trained = FALSE, skip = FALSE, id = rand_id("mice_impute")) {
+    formula_expr <- rlang::quo_get_expr(enquo(formula))
+    formula_chr <- as.character(formula_expr)
+
+    add_step(
+      recipe,
+      step_mice_imputation_new(
+        terms = enquos(...),
+        formula_chr = formula_chr,
+        m = m,
+        role = role,
+        trained = trained,
+        skip = skip,
+        id = id
+      )
+    )
+  }
+
+step_mice_imputation_new <-
+  function(terms, formula_chr, m, role, trained, skip, id) {
+    step(
+      subclass = "mice_imputation",
+      terms = terms,
+      formula_chr = formula_chr,
+      m = m,
+      role = role,
+      trained = trained,
+      skip = skip,
+      id = id
+    )
+  }
+prep.step_mice_imputation <- function(x, training, info = NULL, ...) {
+  predictor_vars <- x$recipe %>%
+    dplyr::filter(role == "predictor") %>%
+    dplyr::pull(variable)
+
+  vars_to_impute <- as.character(x$terms) # Get the variable(s) to impute
+
+  data_for_imputation <- training %>%
+    dplyr::select(dplyr::all_of(c(vars_to_impute, predictor_vars)))
+
+  imputed_data <- impute_with_mice(data = data_for_imputation, formula = as.character(rlang::expr(. ~ .)), m = x$m, ...)
+
+  imputed_data <- imputed_data %>%
+    dplyr::rename_with(~ vars_to_impute[[1]], .cols = dplyr::everything())
+
+  structure(
+    list(
+      imputed_data = imputed_data,
+      terms = x$terms
+    ),
+    class = "prepared_step_mice_imputation"
+  )
+}
+
+bake.prepared_step_mice_imputation <- function(object, new_data, ...) {
+  predictor_vars <- object$recipe %>%
+    dplyr::filter(role == "predictor") %>%
+    dplyr::pull(variable)
+
+  vars_to_impute <- as.character(object$terms) # Get the variable(s) to impute
+
+  data_for_imputation <- new_data %>%
+    dplyr::select(dplyr::all_of(c(vars_to_impute, predictor_vars)))
+
+  imputed_data <- impute_with_mice(data = data_for_imputation, formula = as.character(rlang::expr(. ~ .)), m = object$m, ...)
+
+  imputed_data <- imputed_data %>%
+    dplyr::rename_with(~ vars_to_impute[[1]], .cols = dplyr::everything())
+
+  ret <- new_data %>%
+    dplyr::select(-dplyr::all_of(vars_to_impute)) %>%
+    dplyr::bind_cols(imputed_data)
+  ret
 }
 ```
 
