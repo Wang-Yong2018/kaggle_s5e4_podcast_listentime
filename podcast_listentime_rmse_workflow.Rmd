@@ -429,7 +429,7 @@ internal_get_mice_df_all <- function(){
                         publication_time+
                         number_of_ads+
                         episode_sentiment ))
-  complete_data_all <- complete(imp, "long") |>select(.imp,.id,id, episode_length_minutes)
+  complete_data_all <- complete(imp, "long") |>select(.imp,.id,id, episode_length_minutes,guest_popularity_percentage, number_of_ads)
   return(complete_data_all)
 }
 
@@ -449,12 +449,12 @@ get_mice_df_all <- memoise::memoise(internal_get_mice_df_all,cache=dk_cach)
 get_mice_at <-function(df, imp_id =1){
   mice_result <- get_mice_df_all() |>
     filter(.imp == imp_id)|>
-    select(id,episode_length_minutes)
+    select(id,episode_length_minutes,guest_popularity_percentage,number_of_ads)
   
   matched_mice_result <- df |>
     mutate(has_length=as.integer(is.na(episode_length_minutes)),
            has_guest= as.integer(is.na(guest_popularity_percentage)))|>
-    select(-episode_length_minutes) |>
+    select(-episode_length_minutes,-guest_popularity_percentage,-number_of_ads) |>
     left_join(mice_result, by='id') 
     
   return(matched_mice_result)   
@@ -486,7 +486,7 @@ Thus, we can believe they are same distribution
 
 ```{r}
 set.seed(1234)
-imp_slice =5 
+imp_slice =1 
 #train <- ts_df |> as_tibble() |>filter(source=='train')|>dplyr::select(-source)
 #df_split <- initial_time_split(train, prop = 0.8)
 od_train <- train |>
@@ -868,7 +868,7 @@ set.seed(1234)
 
 simple_wf_fit <- 
   workflow() |>
-  add_recipe(rcp_bs_v4) |>
+  add_recipe(rcp_bs_v1) |>
   add_model(lm_eng)|>
   #add_tailor(tailor_rng)
   fit(train_set)
