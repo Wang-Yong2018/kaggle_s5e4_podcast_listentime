@@ -237,14 +237,14 @@ get_rcp <- function(df) {
     #                 ) |>
     #step_naomit(episode_length_minutes, skip = TRUE)|>
     step_impute_mode(all_nominal_predictors())|>
-    step_mutate(
-                ads_per_minute = number_of_ads / (episode_length_minutes + 1),
-                #number_of_ads = as.integer(number_of_ads),
-               epi_guest = guest_popularity_percentage /(episode_length_minutes + 1),
-               epi_host = host_popularity_percentage /(episode_length_minutes + 1),
-               ads_per_guest = number_of_ads / (guest_popularity_percentage + 1),
-               ads_per_host = number_of_ads / (host_popularity_percentage + 1),
-               score_pctl = score_pctl/(episode_length_minutes))|>
+    # step_mutate(
+    #             ads_per_minute = number_of_ads / (episode_length_minutes + 1),
+    #             #number_of_ads = as.integer(number_of_ads),
+    #            epi_guest = guest_popularity_percentage /(episode_length_minutes + 1),
+    #            epi_host = host_popularity_percentage /(episode_length_minutes + 1),
+    #            ads_per_guest = number_of_ads / (guest_popularity_percentage + 1),
+    #            ads_per_host = number_of_ads / (host_popularity_percentage + 1),
+    #            score_pctl = score_pctl/(episode_length_minutes))|>
            
     ##step_impute_bag(all_numeric_predictors(),impute_with = imp_vars(number_of_ads,publication_day, publication_time, genre)) |>
   
@@ -252,6 +252,14 @@ get_rcp <- function(df) {
     # step_naomit(all_predictors()) %>%       # Remove missing values
     
     #step_normalize(all_numeric_predictors()) %>% # Standardize numeric predictors
+   # step_interact(~all_predictors():all_predictors())|>
+    step_interact(terms = ~ (number_of_ads + guest_popularity_percentage + host_popularity_percentage):episode_length_minutes)|>
+      step_interact(terms = ~ (number_of_ads + guest_popularity_percentage):host_popularity_percentage)|>
+    step_interact(terms = ~ starts_with("publication_day"):episode_sentiment)|>
+    step_interact(terms = ~ starts_with("publication"):episode_length_minutes)|>
+    step_interact(terms = ~ starts_with("genre"):episode_length_minutes)|>
+    step_interact(terms = ~ starts_with("episode_sentiment"):episode_length_minutes)|>
+    step_interact(terms = ~ (score_pctl+episode_id):episode_length_minutes)|>
     step_novel(all_nominal_predictors()) |>
     step_unknown(all_nominal_predictors()) |>
     step_other(all_nominal_predictors()) |>
@@ -406,6 +414,12 @@ mm_fit|>
   mutate(glance=map(result, ~broom::glance(.x)))|>unnest(glance)
 mm_fit |>saveRDS('many_model.Rds'                 )
 ```
+result:
+1. no interaction  10.46/5214 10.48/4830
+2. add number_of_ads + guest_popularity_percentage + host_popularity_percentage):episode_length_minutes       10.37/4567 ;10.40/4213
+3. add publication + genre + sentiment 10.36/2402; 10.38/2222
+4. od score_pctl + episode_id 1036/2289; 1038/2116
+5. publication + sentiment 10.35  10.38/1436; 10.38/1306
 
 # diagnose
 ```{r}
