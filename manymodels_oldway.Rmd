@@ -33,6 +33,8 @@ library(readr)
 library(janitor)
 library(lubridate)
 
+library(mice)
+
 library(memoise)
 dk_cach <- memoise::cache_filesystem('./cache')
 ```
@@ -109,98 +111,7 @@ plt_density <- function(df,col_name='listening_time_minutes'){
            
 }
 ```
-#### step_mice
-```{r}
-library(mice)
-library(recipes)
-library(dplyr)
 
-
-impute_with_mice <- function(data, formula, m = 5, ...) {
-  imp <- mice(data = data, formula = formula, m = m, ...)
-  mice::complete(imp, action = "long") %>%
-    as_tibble() %>%
-    select(-.imp, -.id) %>%
-    pivot_wider(names_from = .var, values_from = .val)
-}
-step_mice_imputation <-
-  function(recipe, ...,
-           formula = . ~ ., m = 5, role = NA, trained = FALSE, skip = FALSE, id = rand_id("mice_impute")) {
-    formula_expr <- rlang::quo_get_expr(enquo(formula))
-    formula_chr <- as.character(formula_expr)
-
-    add_step(
-      recipe,
-      step_mice_imputation_new(
-        terms = enquos(...),
-        formula_chr = formula_chr,
-        m = m,
-        role = role,
-        trained = trained,
-        skip = skip,
-        id = id
-      )
-    )
-  }
-
-step_mice_imputation_new <-
-  function(terms, formula_chr, m, role, trained, skip, id) {
-    step(
-      subclass = "mice_imputation",
-      terms = terms,
-      formula_chr = formula_chr,
-      m = m,
-      role = role,
-      trained = trained,
-      skip = skip,
-      id = id
-    )
-  }
-prep.step_mice_imputation <- function(x, training, info = NULL, ...) {
-  predictor_vars <- x$recipe %>%
-    dplyr::filter(role == "predictor") %>%
-    dplyr::pull(variable)
-
-  vars_to_impute <- as.character(x$terms) # Get the variable(s) to impute
-
-  data_for_imputation <- training %>%
-    dplyr::select(dplyr::all_of(c(vars_to_impute, predictor_vars)))
-
-  imputed_data <- impute_with_mice(data = data_for_imputation, formula = as.character(rlang::expr(. ~ .)), m = x$m, ...)
-
-  imputed_data <- imputed_data %>%
-    dplyr::rename_with(~ vars_to_impute[[1]], .cols = dplyr::everything())
-
-  structure(
-    list(
-      imputed_data = imputed_data,
-      terms = x$terms
-    ),
-    class = "prepared_step_mice_imputation"
-  )
-}
-
-bake.prepared_step_mice_imputation <- function(object, new_data, ...) {
-  predictor_vars <- object$recipe %>%
-    dplyr::filter(role == "predictor") %>%
-    dplyr::pull(variable)
-
-  vars_to_impute <- as.character(object$terms) # Get the variable(s) to impute
-
-  data_for_imputation <- new_data %>%
-    dplyr::select(dplyr::all_of(c(vars_to_impute, predictor_vars)))
-
-  imputed_data <- impute_with_mice(data = data_for_imputation, formula = as.character(rlang::expr(. ~ .)), m = object$m, ...)
-
-  imputed_data <- imputed_data %>%
-    dplyr::rename_with(~ vars_to_impute[[1]], .cols = dplyr::everything())
-
-  ret <- new_data %>%
-    dplyr::select(-dplyr::all_of(vars_to_impute)) %>%
-    dplyr::bind_cols(imputed_data)
-  ret
-}
-```
 
 #### get_rcp
 ```{r}
@@ -226,10 +137,11 @@ get_rcp <- function(df) {
                                                 episode_length_minutes , 
                                                 NA),
                 number_of_ads  = ifelse(number_of_ads  >= 0 & number_of_ads  <= 5, number_of_ads ,  'NA'),
-                has_guest=as.integer(is.na(guest_popularity_percentage)),
-                guest_popularity_percentage = ifelse(is.na(guest_popularity_percentage),0,guest_popularity_percentage),
+                #has_guest=as.integer(is.na(guest_popularity_percentage)),
+                #guest_popularity_percentage = ifelse(is.na(guest_popularity_percentage),0,guest_popularity_percentage),
                 is_weekend = if_else(publication_day %in% c("Saturday", "Sunday"), 1, 0),
-                has_length=as.integer(is.na(episode_length_minutes)))|>
+                #has_length=as.integer(is.na(episode_length_minutes))
+                )|>
  #step_impute_linear(all_numeric_predictors(),impute_with =vars(guest_popularity_percentage,number_of_ads,has_guest,episode_id,host_popularity_percentage,score_pctl,is_weekend))|>
     # step_impute_bag(episode_length_minutes,                # 目标变量
     #                 impute_with = imp_vars(all_predictors()),  # 使用所有其他变量
@@ -251,67 +163,78 @@ get_rcp <- function(df) {
     # Preprocessing steps (customize as needed)
     # step_naomit(all_predictors()) %>%       # Remove missing values
     
-    #step_normalize(all_numeric_predictors()) %>% # Standardize numeric predictors
    # step_interact(~all_predictors():all_predictors())|>
-    step_interact(terms = ~ (number_of_ads + guest_popularity_percentage + host_popularity_percentage):episode_length_minutes)|>
-      step_interact(terms = ~ (number_of_ads + guest_popularity_percentage):host_popularity_percentage)|>
-    step_interact(terms = ~ starts_with("publication_day"):episode_sentiment)|>
-    step_interact(terms = ~ starts_with("publication"):episode_length_minutes)|>
-    step_interact(terms = ~ starts_with("genre"):episode_length_minutes)|>
-    step_interact(terms = ~ starts_with("episode_sentiment"):episode_length_minutes)|>
-    step_interact(terms = ~ (score_pctl+episode_id):episode_length_minutes)|>
     step_novel(all_nominal_predictors()) |>
     step_unknown(all_nominal_predictors()) |>
     step_other(all_nominal_predictors()) |>
     step_dummy(all_nominal_predictors()) |> # One-hot encode categorical vars
+    step_interact(terms = ~ (number_of_ads + guest_popularity_percentage + host_popularity_percentage):episode_length_minutes)|>
+    step_interact(terms = ~ (number_of_ads + guest_popularity_percentage):host_popularity_percentage)|>
+    step_interact(terms = ~ starts_with("publication_day"):starts_with('episode_sentiment'))|>
+    step_interact(terms = ~ starts_with("publication_"):episode_length_minutes)|>
+    step_interact(terms = ~ starts_with("genre"):episode_length_minutes)|>
+    step_interact(terms = ~ starts_with("episode_sentiment"):episode_length_minutes)|>
+    step_interact(terms = ~ (score_pctl+episode_id):episode_length_minutes)|>
+
     step_zv(all_predictors()) |>
+    step_normalize(all_numeric_predictors()) %>% # Standardize numeric predictors
+    step_nzv(all_predictors())|>
     step_corr(all_predictors()) |>
     check_missing(all_predictors())
   return(rcp)
 }
 ```
 
-#### get_beta_mod
-```{r}
-get_beta_mod <- function(df){
-   rmse_metrics <- metric_set(yardstick::rmse) # main goal is roc_auc, accuracy is just for reference
-  set.seed(123)
-  #df <- df|>bind_cols(df|>get_outliers())
-  cv_folds <- vfold_cv(df, v = 3,strata = listening_time_minutes)
-  
-  lm_recipe  <- get_rcp(df)
-  prep_df <- lm_recipe |> prep()|>juice()
-  
-  model <- betareg(
-  listening_time_minutes ~ .,           # Formula (response ~ predictors)
-  data = prep_df ,           # Dataframe
-  link = "logit",        # Default link (others: "probit", "cloglog")
-  link.phi = "log"       # Link for precision parameter (phi)
-  )
-  summary(model)           # Check coefficients & significance
-  
-}
-```
+
 #### fillna_with_mice
 ```{r}
-get_mice_df <- function(df,dataset_id=1){
-  library(mice)    
-  imp <- mice(df, m = 5, maxit = 5, seed = 123,printFlag=F)
-  fit <- with(imp, lm(episode_length_minutes~genre+
+internal_get_mice_df_all <- function(podcast_name){
+ 
+  df <-  train |>bind_rows(test) |> 
+    #select(-listening_time_minutes) |>
+    
+    filter(podcast_name==podcast_name)
+  
+  imp <- mice(df, m = 5, maxit = 5, seed = 123,,printFlag=F)
+  
+  fit <- with(imp, lm(episode_length_minutes~
+                        podcast_name+
+                        genre+
                         host_popularity_percentage+
                         guest_popularity_percentage+
                         publication_day+
                         publication_time+
                         number_of_ads+
                         episode_sentiment ))
-  complete_df <- complete(imp, dataset_id) 
-  return(complete_df)
+  
+  complete_data_all <- complete(imp, "long") |>
+    select(.imp,.id,id, episode_length_minutes,guest_popularity_percentage, number_of_ads)
+  
+  return(complete_data_all)
+}
+
+get_mice_df_all <- memoise::memoise(internal_get_mice_df_all,cache=dk_cach)
+
+get_mice_at <-function(df,podcast_name, imp_id =1){
+  
+  mice_result <- get_mice_df_all({{podcast_name}}) |>
+    filter(.imp == imp_id)|>
+    select(id,episode_length_minutes,guest_popularity_percentage,number_of_ads)
+  
+  matched_mice_result <- df |>
+    mutate(has_length=as.integer(is.na(episode_length_minutes)),
+           has_guest= as.integer(is.na(guest_popularity_percentage)))|>
+    select(-episode_length_minutes,-guest_popularity_percentage,-number_of_ads) |>
+    left_join(mice_result, by='id') 
+    
+  return(matched_mice_result)   
+  
 }
 ```
 
 #### get_mod
 ```{r}
-get_mod <- safely(function(df,return_type='resample') {
+get_mod <- safely(function(podcast_name, df,return_type='resample') {
   
   rmse_metrics <- metric_set(yardstick::rmse) # main goal is roc_auc, accuracy is just for reference
 
@@ -319,7 +242,7 @@ get_mod <- safely(function(df,return_type='resample') {
   # 2. Create 3-Fold Cross-Validation Splits
   set.seed(123)
   #df <- df|>bind_cols(df|>get_outliers())
-  df <- df|> get_mice_df()
+  df <- df|> get_mice_at(podcast_name = podcast_name)
   cv_folds <- vfold_cv(df, v = 3,strata = listening_time_minutes)
   
   lm_recipe  <- get_rcp(df)
@@ -381,7 +304,7 @@ get_mod <- safely(function(df,return_type='resample') {
 ```{r}
 get_predict<- function(wf,newdata,target_type='non'){
   
-  new_data <- newdata |> get_mice_df()
+  new_data <- newdata |> get_mice_at()
   
   .pred <- wf|>
     predict(newdata)
@@ -404,14 +327,14 @@ get_predict<- function(wf,newdata,target_type='non'){
 plan(multisession, workers = availableCores() - 1) 
 
 mm_fit <- tr |>
-  mutate(#cv_data = map(data, ~get_mod(.x),.progress = TRUE),
-         model = map(data, ~get_mod(.x,return_type='fit'),.progress = TRUE,))
-  #unnest(cv_data)
+  mutate(mice_data = map2(.x=podcast_name, .y=data, .f=~get_mice_at(.y,.x)))|>
+  mutate(result = map2(.x=podcast_name, .y= mice_data,, .f=~get_mod(.x,.y, return_type='fit'),.progress = TRUE))|>
+  mutate(model = map(.x=result, .f=~pluck(.x, "result")),
+         error = map(.x=result, .f=~pluck(.x,"error")))
+
 plan(sequential)
 mm_fit|>
-  mutate(  result = map(model, "result"),
-    error = map(model, "error"))|>
-  mutate(glance=map(result, ~broom::glance(.x)))|>unnest(glance)
+  mutate(glance=map(model, ~broom::glance(.x)))|>unnest(glance)
 mm_fit |>saveRDS('many_model.Rds'                 )
 ```
 result:
