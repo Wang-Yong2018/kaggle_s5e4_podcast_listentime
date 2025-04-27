@@ -191,7 +191,7 @@ get_rcp <- function(df) {
 internal_get_mice_df_all <- function(podcast_name){
  
   df <-  train |>bind_rows(test) |> 
-    #select(-listening_time_minutes) |>
+    select(-listening_time_minutes) |>
     
     filter(podcast_name==podcast_name)
   
