@@ -12,7 +12,7 @@ library(themis)
 #library(embed)
 #library(tailor)
 library(furrr)
-
+library(poissonreg)
 library(bonsai)
 library(lightgbm)
 #library(xgboost)
@@ -114,13 +114,13 @@ tmp_df_median <-
   prep() |>
   juice()
 
-tmp_df_knn5 <-
-  recipe(listening_time_minutes~., data=tmp_df_raw) |>
-  step_impute_knn(all_numeric_predictors(),
-                  neighbors =5,
-                  impute_with = vars(all_predictors()))|>
-  prep() |>
-  juice()
+# tmp_df_knn5 <-
+#   recipe(listening_time_minutes~., data=tmp_df_raw) |>
+#   step_impute_knn(all_numeric_predictors(),
+#                   neighbors =5,
+#                   impute_with = vars(all_predictors()))|>
+#   prep() |>
+#   juice()
 
     tmp_df_linear <-
       recipe(listening_time_minutes~., data=tmp_df_raw) |>
@@ -144,22 +144,21 @@ tmp_df_knn5 <-
 
 
 tmp_df_mice_woy<- tmp_df_raw|>get_mice_df(dataset_id = 4,with_y = FALSE)
-tmp_df_mice_wy<- tmp_df_raw|>get_mice_df(dataset_id = 4,with_y = TRUE)
+# tmp_df_mice_wy<- tmp_df_raw|>get_mice_df(dataset_id = 4,with_y = TRUE)
 
 get_glance_lm <- function(df,degree=5, isplot=F){
   library(ggfortify)
   lm_eng <-linear_reg() |>
     set_mode("regression") |>
     set_engine("lm")
-  poisson_glm<- poisson_reg() %>%
-    set_engine("glm",
-               family = poisson(link = "log")  # 泊松分布+对数链接
-    ) %>%
-    set_mode("regression")
+  poisson_glm<-
+    poisson_reg() %>%
+    set_engine("glm.nb")
 
   rcp <- recipe(listening_time_minutes~., data = df)|>
     step_normalize(all_numeric_predictors(), -all_outcomes()) %>%  # 标准化数值变量
-    step_ns(episode_length_minutes, host_popularity_percentage, guest_popularity_percentage,deg_free = degree)|>
+    step_integer(listening_time_minutes)|>
+    #step_ns(episode_length_minutes, host_popularity_percentage, guest_popularity_percentage,deg_free = degree)|>
     step_dummy(all_nominal_predictors())|>
     step_zv(all_predictors())|>
     step_corr(all_predictors())
@@ -167,7 +166,7 @@ get_glance_lm <- function(df,degree=5, isplot=F){
   #lm_eng <- parsnip::linear_reg()+set_mode('regression') + set_engine('lm')
   fit_wf <- workflow() |>
     add_recipe(rcp)|>
-    add_model(lm_eng)|>
+    add_model(poisson_glm)|>
     fit(df)
 
   mod <- fit_wf|>extract_fit_engine()
@@ -179,10 +178,10 @@ get_glance_lm <- function(df,degree=5, isplot=F){
   return(mod|>glance())
 }
 df_list <- list(m_woy=tmp_df_mice_woy,
-                m_wy = tmp_df_mice_wy,
+                #m_wy = tmp_df_mice_wy,
                 mean= tmp_df_mean,
                 median = tmp_df_median,
-                knn5=tmp_df_knn5,
+                #knn5=tmp_df_knn5,
                 linear=tmp_df_linear
 
 )
@@ -191,70 +190,70 @@ df_list |>
   future_map_dfr(\(x) get_glance_lm(x|>mutate_if(is.numeric, ~as.integer(round(.x))),degree =10),.id = 'source') |>
   arrange(AIC)
 
-
-get_glance_gam <- function(df,isplot=F){
-
-  rcp <- recipe(listening_time_minutes~., data = df)|>
-    step_normalize(all_numeric(), -all_outcomes()) %>%  # 标准化数值变量
-    step_dummy(all_nominal_predictors())|>
-    step_zv(all_predictors())|>
-    step_corr(all_predictors())
-  # 3. 模型定义
-
 #
-#     gen_additive_mod(engine="mgcv") |># add selective inference
-#     set_mode("regression") |>
-#     set_engine("gam", # or gam, bam allows for larger datasets
-#                method = "fREML", #recommended parameter for fitting the model
-#                discrete=TRUE,
-# #               nthreads = parallel::detectCores() #if you will run this on a cluster, detect the cores.
-#     )
-    gam_model <-
-      gen_additive_mod() %>%
-      set_engine("mgcv") %>%
-      set_mode("regression")
-
-  # gam_model <-
-  #   gen_additive_mod() |>                # GAM 模型
-  #   set_engine("mgcv", formula = listening_time_minutes~.)|>   # 指定平滑项
-  #   set_mode("regression")
-
-  # 4. 工作流整合
-  gam_workflow <- workflow() %>%
-    add_recipe(rcp) %>%
-    add_model(gam_model)|>
-    fit(data = df)
+# get_glance_gam <- function(df,isplot=F){
 #
+#   rcp <- recipe(listening_time_minutes~., data = df)|>
+#     step_normalize(all_numeric(), -all_outcomes()) %>%  # 标准化数值变量
+#     step_dummy(all_nominal_predictors())|>
+#     step_zv(all_predictors())|>
+#     step_corr(all_predictors())
+#   # 3. 模型定义
+#
+# #
+# #     gen_additive_mod(engine="mgcv") |># add selective inference
+# #     set_mode("regression") |>
+# #     set_engine("gam", # or gam, bam allows for larger datasets
+# #                method = "fREML", #recommended parameter for fitting the model
+# #                discrete=TRUE,
+# # #               nthreads = parallel::detectCores() #if you will run this on a cluster, detect the cores.
+# #     )
+#     gam_model <-
+#       gen_additive_mod() %>%
+#       set_engine("mgcv") %>%
+#       set_mode("regression")
+#
+#   # gam_model <-
+#   #   gen_additive_mod() |>                # GAM 模型
+#   #   set_engine("mgcv", formula = listening_time_minutes~.)|>   # 指定平滑项
+#   #   set_mode("regression")
+#
+#   # 4. 工作流整合
 #   gam_workflow <- workflow() %>%
-#     add_recipe(gam_recipe) %>%
-#     add_model(gam_model)
-#     gam_formula <- listening_time_minutes ~
-#       s(episode_length_minutes, bs = "cr", k = 10) +
-#       s(host_popularity_percentage, bs = "tp") +
-#       s(guest_popularity_percentage, bs = "cr", k = 5) +
-#       te(number_of_ads, genre, k = c(3, 5)) +  # 仅保留关键交互
-#       s(score_pctl, bs = "cr") +
-#       s(episode_sentiment, bs = "re")  # 情感作为随机效应
-
-
-    # gam_model <- gam(
-    #   formula = listening_time_minutes~
-    #     s(episode_length_minutes)+
-    #     s(host_popularity_percentage)+
-    #     s(guest_popularity_percentage)+
-    #     number_of_ads
-    #     #te(genre, publication_day,publication_time, episode_sentiment,episode_id)
-    #     ,
-    #   data = df,
-    #   method = "REML",     # 限制性最大似然，推荐参数估计方法[7](@ref)
-    #   family = gaussian(), # 连续型响应变量
-    #   select = TRUE        # 启用自动平滑项选择[7](@ref)
-    #    )
-  gam_model <- gam_workflow |> extract_fit_engine()
-  gam_model |> glance() |> print()
-  return(gam_model)
-}
-
-get_glance_gam(df=tmp_df_median)
+#     add_recipe(rcp) %>%
+#     add_model(gam_model)|>
+#     fit(data = df)
+# #
+# #   gam_workflow <- workflow() %>%
+# #     add_recipe(gam_recipe) %>%
+# #     add_model(gam_model)
+# #     gam_formula <- listening_time_minutes ~
+# #       s(episode_length_minutes, bs = "cr", k = 10) +
+# #       s(host_popularity_percentage, bs = "tp") +
+# #       s(guest_popularity_percentage, bs = "cr", k = 5) +
+# #       te(number_of_ads, genre, k = c(3, 5)) +  # 仅保留关键交互
+# #       s(score_pctl, bs = "cr") +
+# #       s(episode_sentiment, bs = "re")  # 情感作为随机效应
+#
+#
+#     # gam_model <- gam(
+#     #   formula = listening_time_minutes~
+#     #     s(episode_length_minutes)+
+#     #     s(host_popularity_percentage)+
+#     #     s(guest_popularity_percentage)+
+#     #     number_of_ads
+#     #     #te(genre, publication_day,publication_time, episode_sentiment,episode_id)
+#     #     ,
+#     #   data = df,
+#     #   method = "REML",     # 限制性最大似然，推荐参数估计方法[7](@ref)
+#     #   family = gaussian(), # 连续型响应变量
+#     #   select = TRUE        # 启用自动平滑项选择[7](@ref)
+#     #    )
+#   gam_model <- gam_workflow |> extract_fit_engine()
+#   gam_model |> glance() |> print()
+#   return(gam_model)
+# }
+#
+# get_glance_gam(df=tmp_df_median)
 ## TODO 1. study if the mice package support train /test mode. that is build a model / answer: should not. logic is cycling
 ####
